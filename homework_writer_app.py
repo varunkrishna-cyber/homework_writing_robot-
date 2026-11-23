@@ -2,7 +2,6 @@ import glob
 import json
 import math
 import os
-import random
 import threading
 import time
 import tkinter as tk
@@ -25,7 +24,7 @@ INK_COLOR = "#111111"  # Crisp black pen ink
 
 
 def render_style_sample(canvas, style_label, sample_text="Abc 123", height_mm=16.0, start_x=10, baseline_y=26):
-    """Draws a crisp single-line stroke preview of any custom or built-in style onto a tk.Canvas."""
+    """Draws a smooth single-line stroke preview of any custom or built-in style onto a tk.Canvas."""
     canvas.delete("all")
     canvas.create_line(0, baseline_y, 300, baseline_y, fill="#d2e3fc", width=1)
 
@@ -69,7 +68,7 @@ def render_style_sample(canvas, style_label, sample_text="Abc 123", height_mm=16
                 if x > max_x:
                     max_x = x
             if len(pts) > 1:
-                canvas.create_line(pts, fill=INK_COLOR, width=1.4, smooth=False, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+                canvas.create_line(pts, fill=INK_COLOR, width=1.4, smooth=True, capstyle=tk.ROUND)
 
         cursor_x += (max_x if max_x > 0 else height_mm * 0.45) + 2.5
 
@@ -135,7 +134,7 @@ class HomeworkWriterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Auto-Homework Pen Plotter Studio — Ultra-Precision Edition")
+        self.title("Auto-Homework Pen Plotter Studio")
         self.geometry("1280x820")
 
         os.makedirs(FONTS_DIR, exist_ok=True)
@@ -284,11 +283,11 @@ class HomeworkWriterApp(ctk.CTk):
         self.size_slider.set(6.0)
         self.size_slider.pack(fill="x", padx=15, pady=2)
 
-        self.chaos_label = ctk.CTkLabel(self.sidebar, text="Natural Flow Variation: 15%", font=("Segoe UI", 12))
+        self.chaos_label = ctk.CTkLabel(self.sidebar, text="Handwriting Slant: 15%", font=("Segoe UI", 12))
         self.chaos_label.pack(anchor="w", padx=16)
         self.chaos_slider = ctk.CTkSlider(
             self.sidebar, from_=0, to=100,
-            command=lambda v: self.chaos_label.configure(text=f"Natural Flow Variation: {int(v)}%")
+            command=lambda v: self.chaos_label.configure(text=f"Handwriting Slant: {int(v)}%")
         )
         self.chaos_slider.set(15)
         self.chaos_slider.pack(fill="x", padx=15, pady=2)
@@ -382,7 +381,7 @@ class HomeworkWriterApp(ctk.CTk):
         self.textbox.grid(row=2, column=0, sticky="nsew", padx=(10, 6), pady=(0, 6))
         self.textbox.insert("1.0", "Experiment 1: Ohm's Law\n\nAim: To verify the relationship between voltage and current.\n\nFormula: V = I * R")
 
-        # --- Right Pane: High-Precision Zoomable A4 Canvas ---
+        # --- Right Pane: Zoomable A4 Canvas ---
         canvas_container = ctk.CTkFrame(self.main_frame, fg_color="#0b0f19", corner_radius=8, border_width=1, border_color="#334155")
         canvas_container.grid(row=2, column=1, sticky="nsew", padx=(6, 10), pady=(0, 6))
         canvas_container.grid_rowconfigure(0, weight=1)
@@ -409,7 +408,7 @@ class HomeworkWriterApp(ctk.CTk):
         self.stats_lbl.pack(side="right", padx=10, pady=2)
 
     # ==========================================================
-    # VIEWPORT ZOOM, PAN & PRECISION A4 RENDERING
+    # VIEWPORT ZOOM, PAN & A4 RENDERING
     # ==========================================================
     def adjust_zoom(self, factor):
         self.zoom_scale = max(1.0, min(12.0, self.zoom_scale * factor))
@@ -496,7 +495,7 @@ class HomeworkWriterApp(ctk.CTk):
                         joinstyle=tk.MITER
                     )
 
-        # 5. Draw Diagrams Layer (Sharp Geometric & Circuit Vectors in Black Ink)
+        # 5. Draw Diagrams Layer (Crisp Straight Vectors in Black Ink)
         if self.show_diagram_layer.get():
             for stroke in self.mm_diagram_strokes:
                 pts = [(ox + x * z, oy + y * z) for x, y in stroke]
@@ -510,7 +509,7 @@ class HomeworkWriterApp(ctk.CTk):
                         joinstyle=tk.MITER
                     )
 
-        # 6. Draw Handwriting Layer (Zero-Shake Black Pen Ink)
+        # 6. Draw Handwriting Layer (Smooth Cursive Black Pen Ink)
         if self.show_text_layer.get():
             for stroke in self.mm_text_strokes:
                 pts = [(ox + x * z, oy + y * z) for x, y in stroke]
@@ -519,9 +518,8 @@ class HomeworkWriterApp(ctk.CTk):
                         pts,
                         fill=INK_COLOR,
                         width=stroke_w,
-                        smooth=False,
-                        capstyle=tk.ROUND,
-                        joinstyle=tk.ROUND
+                        smooth=True,
+                        capstyle=tk.ROUND
                     )
 
     # ==========================================================
@@ -549,7 +547,7 @@ class HomeworkWriterApp(ctk.CTk):
         if not self.current_file_path:
             return
 
-        self.status_label.configure(text="Extracting text, tables & diagrams at 300 DPI...", text_color="#f59e0b")
+        self.status_label.configure(text="Extracting text, tables & diagrams...", text_color="#f59e0b")
         self.update()
 
         try:
@@ -705,21 +703,17 @@ class HomeworkWriterApp(ctk.CTk):
             self.status_label.configure(text=f"Error: {str(e)[:30]}", text_color="#ef4444")
 
     # ==========================================================
-    # SMOOTH STROKE & SUB-MILLIMETER G-CODE GENERATION
+    # STEADY STROKE & G-CODE GENERATION
     # ==========================================================
-    def _build_text_run_mm(self, text_str, start_x, baseline_y, letter_h, chaos, is_custom, custom_glyphs, font):
+    def _build_text_run_mm(self, text_str, start_x, baseline_y, letter_h, slant_amt, is_custom, custom_glyphs, font):
         strokes_out = []
         cursor_x = start_x
-        word_slant = (0.04 + random.uniform(-0.02, 0.04)) * chaos
+        slant = 0.14 * slant_amt
 
-        for idx_c, char in enumerate(text_str):
+        for char in text_str:
             if char == " ":
-                cursor_x += (letter_h * 0.45) + random.uniform(-0.15, 0.2) * chaos
+                cursor_x += letter_h * 0.48
                 continue
-
-            # Smooth sinusoidal baseline flow instead of jerky per-character shaking
-            y_drift = math.sin(idx_c * 0.35) * 0.18 * chaos
-            scale_flow = 1.0 + (math.cos(idx_c * 0.4) * 0.025 * chaos)
 
             if is_custom and char in custom_glyphs:
                 strokes = [[(x * letter_h, y * letter_h) for x, y in s] for s in custom_glyphs[char]]
@@ -733,20 +727,20 @@ class HomeworkWriterApp(ctk.CTk):
                     continue
                 mm_pts = []
                 for x, y in stroke:
-                    px = cursor_x + (x * scale_flow) + (y * word_slant)
-                    py = baseline_y - (y * scale_flow) + y_drift
+                    px = cursor_x + x + (y * slant)
+                    py = baseline_y - y
                     mm_pts.append((px, py))
-                    if x * scale_flow > max_x:
-                        max_x = x * scale_flow
+                    if x > max_x:
+                        max_x = x
                 if len(mm_pts) > 1:
                     strokes_out.append(mm_pts)
 
-            cursor_x += (max_x if max_x > 0 else letter_h * 0.35) + 0.65
+            cursor_x += (max_x if max_x > 0 else letter_h * 0.35) + (letter_h * 0.12)
         return strokes_out
 
     def generate_paths(self):
         letter_h = self.size_slider.get()
-        chaos = self.chaos_slider.get() / 100.0
+        slant_amt = self.chaos_slider.get() / 100.0
         pen_down_angle = int(self.servo_slider.get())
         selected = self.current_style
 
@@ -786,7 +780,7 @@ class HomeworkWriterApp(ctk.CTk):
                         item["x_mm"],
                         item["y_mm"],
                         scaled_h,
-                        chaos,
+                        slant_amt,
                         is_custom,
                         custom_glyphs,
                         font
@@ -802,19 +796,16 @@ class HomeworkWriterApp(ctk.CTk):
                 cursor_x = margin_left
                 cursor_y = 30.0
                 line_spacing = 10.0
+                slant = 0.14 * slant_amt
 
-                for idx_c, char in enumerate(text):
+                for char in text:
                     if char == '\n':
                         cursor_x = margin_left
                         cursor_y += line_spacing
                         continue
                     if char == ' ':
-                        cursor_x += (letter_h * 0.55)
+                        cursor_x += letter_h * 0.52
                         continue
-
-                    y_drift = math.sin(idx_c * 0.35) * 0.22 * chaos
-                    scale_flow = 1.0 + (math.cos(idx_c * 0.4) * 0.03 * chaos)
-                    slant = 0.06 * chaos
 
                     if is_custom and char in custom_glyphs:
                         strokes = [[(x * letter_h, y * letter_h) for x, y in s] for s in custom_glyphs[char]]
@@ -827,20 +818,20 @@ class HomeworkWriterApp(ctk.CTk):
                             continue
                         mm_pts = []
                         for x, y in stroke:
-                            px = cursor_x + (x * scale_flow) + (y * slant)
-                            py = cursor_y - (y * scale_flow) + y_drift
+                            px = cursor_x + x + (y * slant)
+                            py = cursor_y - y
                             mm_pts.append((px, py))
-                            if x * scale_flow > max_x:
-                                max_x = x * scale_flow
+                            if x > max_x:
+                                max_x = x
                         if len(mm_pts) > 1:
                             self.mm_text_strokes.append(mm_pts)
 
-                    cursor_x += (max_x if max_x > 0 else letter_h * 0.4) + 1.0
+                    cursor_x += (max_x if max_x > 0 else letter_h * 0.4) + (letter_h * 0.14)
                     if cursor_x > margin_right:
                         cursor_x = margin_left
                         cursor_y += line_spacing
 
-        # Build Unified Sub-Millimeter G-Code (0.001 mm precision)
+        # Build Unified G-Code
         self.gcode_lines = ["G21", "G90", "M3 S0", "G0 X0.000 Y0.000 F3500"]
         total_dist_mm = 0.0
 
@@ -857,13 +848,12 @@ class HomeworkWriterApp(ctk.CTk):
                 last_x, last_y = x0, y0
                 for px, py in stroke[1:]:
                     seg_len = math.hypot(px - last_x, py - last_y)
-                    if seg_len < 0.05:  # Filter micro-jitter moves smaller than 50 microns
+                    if seg_len < 0.05:
                         continue
                     total_dist_mm += seg_len
                     self.gcode_lines.append(f"G1 X{px:.3f} Y{py:.3f} F{feed_rate}")
                     last_x, last_y = px, py
 
-        # Plot ruler-straight tables first, then diagrams, then smooth handwriting
         append_strokes_to_gcode(self.mm_table_strokes, 1400)
         append_strokes_to_gcode(self.mm_diagram_strokes, 1600)
         append_strokes_to_gcode(self.mm_text_strokes, 1800)
@@ -880,7 +870,7 @@ class HomeworkWriterApp(ctk.CTk):
             text=f"Tables: {len(self.mm_table_strokes)} | Diagrams: {len(self.mm_diagram_strokes)} | Est. Time: {mins}m {secs}s"
         )
         self.status_label.configure(
-            text=f"Ready: {len(self.gcode_lines)} G-code commands (0.001mm precision)",
+            text=f"Ready: {len(self.gcode_lines)} G-code commands",
             text_color="#38bdf8"
         )
 

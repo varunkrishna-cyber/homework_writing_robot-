@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DraftMate — Architectural Pen Plotter Studio</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  :root {
+    --bg-canvas: #e5e7eb;
+    --grid-line: rgba(148, 163, 184, 0.28);
+    --surface: #ffffff;
+    --surface-alt: #f8fafc;
+    --border: #cbd5e1;
+    --ink: #0f172a;
+    --muted: #64748b;
+    --primary: #0f766e;
+    --primary-hover: #115e59;
+    --accent: #d97706;
+    --danger: #dc2626;
+    --success: #15803d;
+    --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08);
+    --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.14);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+
+  body {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--bg-canvas);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 24px 24px;
+    color: var(--ink);
+    overflow: hidden;
+  }
+
+  /* =========================================================
+     TOP ARCHITECTURAL RIBBON HEADER
+     ========================================================= */
+  .top-ribbon {
+    height: 56px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    box-shadow: var(--shadow-sm);
+    z-index: 20;
+  }
+
+  .brand-group { display: flex; align-items: center; gap: 10px; }
+  .logo-badge {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: linear-gradient(135deg, #0f766e, #0d9488);
+    color: #fff; display: grid; place-items: center;
+    font-weight: 800; font-size: 16px;
+  }
+  .brand-title { font-weight: 800; font-size: 16px; letter-spacing: -0.3px; }
+  .brand-tag {
+    font-size: 11px; font-weight: 600; color: var(--primary);
+    background: #ccfbf1; padding: 2px 8px; border-radius: 99px;
+  }
+
+  .ribbon-actions { display: flex; align-items: center; gap: 8px; }
+
+  button, select {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink);
+    padding: 7px 12px;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  button:hover:not(:disabled) { background: var(--surface-alt); border-color: #94a3b8; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+
+  .btn-accent { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-accent:hover:not(:disabled) { background: #b45309; border-color: #b45309; }
+
+  .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .btn-danger:hover:not(:disabled) { background: #b91c1c; }
+
+  .status-pill {
+    font-size: 12px; font-weight: 600; padding: 5px 12px;
+    border-radius: 99px; background: #f1f5f9; border: 1px solid var(--border);
+    color: var(--muted); display: flex; align-items: center; gap: 6px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+  .dot.online { background: #16a34a; box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.2); }
+  .dot.busy { background: #d97706; box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.2); }
+
+  /* =========================================================
+     MAIN DRAFTING WORKSPACE (3-ZONE LAYOUT)
+     ========================================================= */
+  .main-stage {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 330px 1fr 290px;
+    gap: 14px;
+    padding: 14px;
+    min-height: 0;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .card-title {
+    padding: 10px 14px;
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  /* Left Card: Document & Paste Input */
+  .drop-box {
+    margin: 12px;
+    padding: 14px 10px;
+    border: 2px dashed #94a3b8;
+    border-radius: 10px;
+    background: #f8fafc;
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: 0.15s;
+  }
+  .drop-box:hover, .drop-box.dragover {
+    border-color: var(--primary);
+    background: #f0fdfa;
+    color: var(--primary);
+  }
+
+  .page-nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px 10px 12px; font-size: 12px; color: var(--muted);
+  }
+
+  textarea {
+    flex: 1;
+    border: none;
+    border-top: 1px solid var(--border);
+    padding: 12px 14px;
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink);
+    background: #ffffff;
+    resize: none;
+    outline: none;
+  }
+
+  /* Center Stage: Interactive A4 Drafting Table */
+  .viewport-container {
+    position: relative;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: #cbd5e1;
+    box-shadow: inset 0 2px 8px rgba(15, 23, 42, 0.1);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  .floating-toolbar {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(255, 255, 255, 0.94);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 6px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: var(--shadow-lg);
+    font-size: 12px;
+  }
+
+  .floating-toolbar button {
+    border-radius: 99px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+  }
+
+  .coord-chip {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    background: rgba(15, 23, 42, 0.82);
+    color: #f8fafc;
+    font-family: 'Consolas', monospace;
+    font-size: 11.5px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    pointer-events: none;
+  }
+
+  /* Right Card: Calibration & Pen Parameters */
+  .inspector-body {
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .param-block { display: flex; flex-direction: column; gap: 5px; }
+  .param-hdr { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; }
+  .param-val { color: var(--primary); font-family: 'Consolas', monospace; }
+  input[type="range"] { width: 100%; accent-color: var(--primary); cursor: pointer; }
+
+  .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 10px; background: var(--surface-alt);
+    border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; font-weight: 600;
+  }
+
+  .telemetry-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border);
+  }
+  .stat-tile {
+    background: var(--surface-alt); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  .stat-lbl { font-size: 10.5px; color: var(--muted); font-weight: 700; text-transform: uppercase; }
+  .stat-num { font-size: 14px; font-weight: 800; color: var(--ink); margin-top: 2px; font-family: 'Consolas', monospace; }
+
+  .prog-bar { height: 6px; background: #e2e8f0; border-radius: 99px; overflow: hidden; }
+  .prog-fill { height: 100%; width: 0%; background: var(--primary); transition: width 0.15s; }
+</style>
+</head>
+<body>
+
+  <!-- TOP RIBBON -->
+  <header class="top-ribbon">
+    <div class="brand-group">
+      <div class="logo-badge">✒</div>
+      <div>
+        <div class="brand-title">DraftMate Studio</div>
+      </div>
+      <span class="brand-tag">A4 Precision Plotter</span>
+    </div>
+
+    <div class="status-pill">
+      <span id="statusDot" class="dot"></span>
+      <span id="statusText">Ready • Standalone Browser Engine</span>
+    </div>
+
+    <div class="ribbon-actions">
+      <button id="btnUsb" onclick="connectArduinoUsb()">🔌 Connect USB</button>
+      <button onclick="exportGcodeFile()">⬇ Export .GCODE</button>
+      <button id="btnRun" class="btn-primary" onclick="runPlotter()">▶ Start Plotter</button>
+      <button id="btnStop" class="btn-danger" onclick="haltPlotter()" disabled>■ Stop</button>
+    </div>
+  </header>
+
+  <!-- 3-COLUMN DRAFTING WORKSPACE -->
+  <div class="main-stage">
+
+    <!-- LEFT PANEL: SOURCE INPUT & TEXT EDITOR -->
+    <section class="card">
+      <div class="card-title">
+        <span>1. Source Input</span>
+        <button style="padding:3px 8px; font-size:11px;" onclick="document.getElementById('fileInput').click()">Browse</button>
+      </div>
+
+      <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.txt" style="display:none" onchange="loadUserFile(this.files[0])" />
+      <input type="file" id="fontJsonInput" accept=".json" style="display:none" onchange="loadCustomFontJson(this.files[0])" />
+
+      <div id="dropZone" class="drop-box" onclick="document.getElementById('fileInput').click()">
+        <b>Drop PDF, Sketch, or Text here</b><br/>
+        or press <b>Ctrl + V</b> anywhere to paste an image
+      </div>
+
+      <div class="page-nav">
+        <button id="btnPrev" style="padding:3px 9px;" onclick="changePdfPage(-1)" disabled>◀ Prev</button>
+        <span id="lblPage">Page 1 of 1</span>
+        <button id="btnNext" style="padding:3px 9px;" onclick="changePdfPage(1)" disabled>Next ▶</button>
+      </div>
+
+      <div class="card-title" style="border-top:1px solid var(--border);">
+        <span>Document Text</span>
+        <button style="padding:2px 8px; font-size:11px;" onclick="compilePaths()">Sync</button>
+      </div>
+
+      <textarea id="editor" oninput="scheduleCompile()">Experiment 1: Ohm's Law
+
+Aim: To verify the relationship between voltage and current.
+
+Formula: V = I * R</textarea>
+    </section>
+
+    <!-- CENTER STAGE: INTERACTIVE A4 SHEET -->
+    <section class="viewport-container">
+      <div id="coordHud" class="coord-chip">X: 0.0 mm  Y: 0.0 mm  |  100%</div>
+      <canvas id="sheetCanvas"></canvas>
+
+      <div class="floating-toolbar">
+        <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-weight:600;">
+          <input type="checkbox" id="chkShowDraw" checked onchange="drawSheet()" /> Drawings
+        </label>
+        <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-weight:600;">
+          <input type="checkbox" id="chkShowText" checked onchange="drawSheet()" /> Text
+        </label>
+        <span style="color:#cbd5e1;">|</span>
+        <button id="btnSim" class="btn-accent" onclick="togglePenSimulation()">▶ Simulate Pen</button>
+        <span style="color:#cbd5e1;">|</span>
+        <button onclick="zoomSheet(0.85)">−</button>
+        <button onclick="zoomSheet(1.18)">+</button>
+        <button onclick="resetSheetView()">Fit A4</button>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: PEN & CALIBRATION INSPECTOR -->
+    <section class="card">
+      <div class="card-title">
+        <span>2. Pen & Calibration</span>
+      </div>
+
+      <div class="inspector-body">
+        <label class="toggle-row" style="cursor:pointer;">
+          <span>1:1 Exact PDF / Image Layout</span>
+          <input type="checkbox" id="chkExactLayout" onchange="compilePaths()" />
+        </label>
+
+        <div class="param-block">
+          <div class="param-hdr">
+            <span>Handwriting Font</span>
+            <button style="padding:2px 7px; font-size:10.5px;" onclick="document.getElementById('fontJsonInput').click()">+ Load .JSON</button>
+          </div>
+          <select id="selFont" onchange="compilePaths()">
+            <option value="builtin">Built-in Neat Script</option>
+          </select>
+        </div>
+
+        <div class="param-block">
+          <div class="param-hdr">
+            <span>Letter Height</span>
+            <span id="valHeight" class="param-val">6.0 mm</span>
+          </div>
+          <input type="range" id="sldHeight" min="3" max="14" step="0.5" value="6" oninput="updateParamLabels()" />
+        </div>
+
+        <div class="param-block">
+          <div class="param-hdr">
+            <span>Handwriting Slant</span>
+            <span id="valSlant" class="param-val">15%</span>
+          </div>
+          <input type="range" id="sldSlant" min="0" max="100" step="5" value="15" oninput="updateParamLabels()" />
+        </div>
+
+        <div class="param-block">
+          <div class="param-hdr">
+            <span>Sketch Hatch Shading</span>
+            <span id="valShade" class="param-val">Medium</span>
+          </div>
+          <input type="range" id="sldShade" min="0" max="3" step="1" value="2" oninput="onShadeSliderChange()" />
+        </div>
+
+        <div class="param-block">
+          <div class="param-hdr">
+            <span>Pen Down Servo Angle</span>
+            <span id="valServo" class="param-val">45°</span>
+          </div>
+          <input type="range" id="sldServo" min="10" max="120" step="1" value="45" oninput="updateParamLabels()" />
+        </div>
+
+        <div class="prog-bar"><div id="progFill" class="prog-fill"></div></div>
+
+        <div class="telemetry-grid">
+          <div class="stat-tile">
+            <div class="stat-lbl">G-Code Lines</div>
+            <div id="statLines" class="stat-num">0</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-lbl">Est. Plot Time</div>
+            <div id="statTime" class="stat-num">0m 0s</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// Built-in Single-Stroke Vector Alphabet
+const BASE_GLYPHS = {
+  'A': [[[0,0],[0.3,1],[0.6,0]], [[0.1,0.35],[0.5,0.35]]],
+  'B': [[[0,0],[0,1],[0.4,1],[0.52,0.88],[0.52,0.62],[0.4,0.5],[0,0.5]], [[0.4,0.5],[0.55,0.38],[0.55,0.12],[0.4,0],[0,0]]],
+  'C': [[[0.55,0.85],[0.4,1],[0.15,1],[0,0.8],[0,0.2],[0.15,0],[0.4,0],[0.55,0.15]]],
+  'D': [[[0,0],[0,1],[0.35,1],[0.55,0.8],[0.55,0.2],[0.35,0],[0,0]]],
+  'E': [[[0.5,1],[0,1],[0,0],[0.5,0]], [[0,0.5],[0.4,0.5]]],
+  'F': [[[0.5,1],[0,1],[0,0]], [[0,0.5],[0.4,0.5]]],
+  'G': [[[0.55,0.85],[0.4,1],[0.15,1],[0,0.8],[0,0.2],[0.15,0],[0.45,0],[0.55,0.2],[0.55,0.45],[0.32,0.45]]],
+  'H': [[[0,1],[0,0]], [[0.55,1],[0.55,0]], [[0,0.5],[0.55,0.5]]],
+  'I': [[[0.15,1],[0.45,1]], [[0.3,1],[0.3,0]], [[0.15,0],[0.45,0]]],
+  'J': [[[0.45,1],[0.45,0.2],[0.32,0],[0.12,0],[0,0.18]]],
+  'K': [[[0,1],[0,0]], [[0.55,1],[0.05,0.45],[0.55,0]]],
+  'L': [[[0,1],[0,0],[0.5,0]]],
+  'M': [[[0,0],[0,1],[0.32,0.35],[0.64,1],[0.64,0]]],
+  'N': [[[0,0],[0,1],[0.55,0],[0.55,1]]],
+  'O': [[[0.2,1],[0.4,1],[0.58,0.8],[0.58,0.2],[0.4,0],[0.2,0],[0,0.2],[0,0.8],[0.2,1]]],
+  'P': [[[0,0],[0,1],[0.42,1],[0.55,0.85],[0.55,0.62],[0.42,0.5],[0,0.5]]],
+  'Q': [[[0.2,1],[0.4,1],[0.58,0.8],[0.58,0.2],[0.4,0],[0.2,0],[0,0.2],[0,0.8],[0.2,1]], [[0.38,0.22],[0.62,-0.05]]],
+  'R': [[[0,0],[0,1],[0.42,1],[0.55,0.85],[0.55,0.62],[0.42,0.5],[0,0.5]], [[0.32,0.5],[0.55,0]]],
+  'S': [[[0.52,0.88],[0.38,1],[0.15,1],[0.02,0.85],[0.02,0.65],[0.52,0.38],[0.52,0.15],[0.38,0],[0.12,0],[0,0.14]]],
+  'T': [[[0,1],[0.6,1]], [[0.3,1],[0.3,0]]],
+  'U': [[[0,1],[0,0.2],[0.15,0],[0.4,0],[0.55,0.2],[0.55,1]]],
+  'V': [[[0,1],[0.28,0],[0.56,1]]],
+  'W': [[[0,1],[0.18,0],[0.35,0.6],[0.52,0],[0.7,1]]],
+  'X': [[[0,1],[0.55,0]], [[0.55,1],[0,0]]],
+  'Y': [[[0,1],[0.28,0.48],[0.56,1]], [[0.28,0.48],[0.28,0]]],
+  'Z': [[[0,1],[0.55,1],[0,0],[0.55,0]]],
+  'a': [[[0.42,0.55],[0.15,0.55],[0,0.4],[0,0.15],[0.15,0],[0.42,0]], [[0.42,0.55],[0.42,0]]],
+  'b': [[[0,1],[0,0],[0.32,0],[0.45,0.15],[0.45,0.42],[0.32,0.55],[0,0.55]]],
+  'c': [[[0.42,0.45],[0.3,0.55],[0.12,0.55],[0,0.4],[0,0.15],[0.12,0],[0.3,0],[0.42,0.1]]],
+  'd': [[[0.45,1],[0.45,0],[0.15,0],[0,0.15],[0,0.42],[0.15,0.55],[0.45,0.55]]],
+  'e': [[[0,0.28],[0.44,0.28],[0.44,0.44],[0.3,0.55],[0.12,0.55],[0,0.4],[0,0.14],[0.14,0],[0.38,0]]],
+  'f': [[[0.38,0.92],[0.26,1],[0.15,0.9],[0.15,0]], [[0.02,0.55],[0.34,0.55]]],
+  'g': [[[0.44,0.55],[0.15,0.55],[0,0.42],[0,0.15],[0.15,0],[0.44,0]], [[0.44,0.55],[0.44,-0.22],[0.3,-0.34],[0.1,-0.34]]],
+  'h': [[[0,1],[0,0]], [[0,0.42],[0.16,0.55],[0.34,0.55],[0.44,0.42],[0.44,0]]],
+  'i': [[[0.15,0.55],[0.15,0]], [[0.15,0.78],[0.15,0.82]]],
+  'j': [[[0.22,0.55],[0.22,-0.22],[0.1,-0.34],[0,-0.3]], [[0.22,0.78],[0.22,0.82]]],
+  'k': [[[0,1],[0,0]], [[0.42,0.55],[0.04,0.25],[0.42,0]]],
+  'l': [[[0.15,1],[0.15,0.08],[0.25,0]]],
+  'm': [[[0,0.55],[0,0]], [[0,0.44],[0.12,0.55],[0.24,0.55],[0.32,0.44],[0.32,0]], [[0.32,0.44],[0.44,0.55],[0.56,0.55],[0.64,0.44],[0.64,0]]],
+  'n': [[[0,0.55],[0,0]], [[0,0.42],[0.16,0.55],[0.34,0.55],[0.44,0.42],[0.44,0]]],
+  'o': [[[0.15,0.55],[0.32,0.55],[0.45,0.4],[0.45,0.15],[0.32,0],[0.15,0],[0,0.15],[0,0.4],[0.15,0.55]]],
+  'p': [[[0,-0.34],[0,0.55],[0.32,0.55],[0.45,0.42],[0.45,0.15],[0.32,0],[0,0]]],
+  'q': [[[0.44,-0.34],[0.44,0.55],[0.14,0.55],[0,0.42],[0,0.15],[0.14,0],[0.44,0]]],
+  'r': [[[0,0.55],[0,0]], [[0,0.38],[0.14,0.55],[0.32,0.55]]],
+  's': [[[0.4,0.46],[0.28,0.55],[0.12,0.55],[0.02,0.44],[0.4,0.16],[0.28,0],[0.1,0],[0,0.1]]],
+  't': [[[0.18,0.88],[0.18,0.1],[0.28,0],[0.38,0]], [[0.04,0.55],[0.34,0.55]]],
+  'u': [[[0,0.55],[0,0.14],[0.14,0],[0.32,0],[0.44,0.14],[0.44,0.55]]],
+  'v': [[[0,0.55],[0.22,0],[0.44,0.55]]],
+  'w': [[[0,0.55],[0.14,0],[0.28,0.38],[0.42,0],[0.56,0.55]]],
+  'x': [[[0,0.55],[0.44,0]], [[0.44,0.55],[0,0]]],
+  'y': [[[0,0.55],[0.22,0]], [[0.44,0.55],[0.12,-0.34],[0,-0.34]]],
+  'z': [[[0,0.55],[0.42,0.55],[0,0],[0.42,0]]],
+  '0': [[[0.18,1],[0.38,1],[0.52,0.8],[0.52,0.2],[0.38,0],[0.18,0],[0,0.2],[0,0.8],[0.18,1]]],
+  '1': [[[0.12,0.82],[0.28,1],[0.28,0]], [[0.12,0],[0.44,0]]],
+  '2': [[[0.04,0.82],[0.2,1],[0.4,1],[0.52,0.84],[0.52,0.65],[0.02,0],[0.54,0]]],
+  '3': [[[0.04,0.86],[0.2,1],[0.4,1],[0.52,0.84],[0.52,0.64],[0.34,0.52],[0.22,0.52]], [[0.34,0.52],[0.54,0.38],[0.54,0.16],[0.38,0],[0.16,0],[0.02,0.14]]],
+  '4': [[[0.42,0],[0.42,1],[0,0.32],[0.56,0.32]]],
+  '5': [[[0.5,1],[0.06,1],[0.04,0.56],[0.38,0.56],[0.52,0.4],[0.52,0.16],[0.36,0],[0.14,0],[0.02,0.14]]],
+  '6': [[[0.46,0.88],[0.32,1],[0.16,1],[0.02,0.8],[0.02,0.18],[0.16,0],[0.38,0],[0.52,0.18],[0.52,0.38],[0.38,0.52],[0.02,0.52]]],
+  '7': [[[0,1],[0.54,1],[0.18,0]]],
+  '8': [[[0.18,0.52],[0.04,0.66],[0.04,0.86],[0.18,1],[0.38,1],[0.52,0.86],[0.52,0.66],[0.38,0.52],[0.18,0.52],[0.02,0.36],[0.02,0.16],[0.18,0],[0.38,0],[0.54,0.16],[0.54,0.36],[0.38,0.52]]],
+  '9': [[[0.52,0.48],[0.16,0.48],[0.02,0.62],[0.02,0.84],[0.16,1],[0.38,1],[0.52,0.84],[0.52,0.18],[0.36,0],[0.14,0]]],
+  '.': [[[0.12,0.06],[0.18,0.06],[0.18,0],[0.12,0],[0.12,0.06]]],
+  ',': [[[0.16,0.08],[0.16,-0.12],[0.08,-0.2]]],
+  ':': [[[0.14,0.52],[0.14,0.46]], [[0.14,0.08],[0.14,0.02]]],
+  ';': [[[0.14,0.52],[0.14,0.46]], [[0.14,0.08],[0.14,-0.12],[0.06,-0.2]]],
+  '-': [[[0.06,0.42],[0.42,0.42]]],
+  '=': [[[0.06,0.54],[0.46,0.54]], [[0.06,0.32],[0.46,0.32]]],
+  '+': [[[0.26,0.68],[0.26,0.18]], [[0.04,0.43],[0.48,0.43]]],
+  '*': [[[0.26,0.68],[0.26,0.22]], [[0.06,0.56],[0.46,0.34]], [[0.46,0.56],[0.06,0.34]]],
+  '/': [[[0.04,0],[0.46,1]]],
+  '(': [[[0.34,1],[0.14,0.75],[0.14,0.25],[0.34,0]]],
+  ')': [[[0.12,1],[0.32,0.75],[0.32,0.25],[0.12,0]]],
+  '!': [[[0.16,1],[0.16,0.25]], [[0.16,0.06],[0.16,0]]],
+  '?': [[[0.04,0.82],[0.18,1],[0.38,1],[0.5,0.84],[0.5,0.65],[0.26,0.45],[0.26,0.26]], [[0.26,0.06],[0.26,0]]],
+  "'": [[[0.14,1],[0.14,0.76]]],
+  '"': [[[0.1,1],[0.1,0.76]], [[0.26,1],[0.26,0.76]]],
+};
+
+const customFonts = {};
+let pdfDocument = null;
+let pdfPageNum = 1;
+let pdfPageTotal = 1;
+let cachedImageSource = null;
+
+let exactSpans = [];
+let drawStrokes = [];
+let textStrokes = [];
+let gcodeList = [];
+
+// Viewport & Pen Simulation State
+let viewZoom = 1.9, viewPanX = 80, viewPanY = 22;
+let isPanning = false, panStartX = 0, panStartY = 0;
+let compileDebounce = null;
+let simTimer = null, simProgress = 1.0;
+
+// Hardware Serial State
+let portHandle = null, portWriter = null, plottingActive = false, abortPlot = false;
+
+const canvas = document.getElementById('sheetCanvas');
+const ctx = canvas.getContext('2d');
+
+window.addEventListener('load', () => {
+  fitCanvasResolution();
+  window.addEventListener('resize', fitCanvasResolution);
+  resetSheetView();
+  compilePaths();
+});
+
+function fitCanvasResolution() {
+  canvas.width = canvas.parentElement.clientWidth;
+  canvas.height = canvas.parentElement.clientHeight;
+  drawSheet();
+}
+
+// ==========================================================
+// FILE UPLOAD, DRAG-DROP & CLIPBOARD PASTE (CTRL+V)
+// ==========================================================
+window.addEventListener('paste', (e) => {
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      loadUserFile(item.getAsFile());
+      return;
+    }
+  }
+});
+
+const dropZone = document.getElementById('dropZone');
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) loadUserFile(e.dataTransfer.files[0]);
+});
+
+async function loadCustomFontJson(file) {
+  if (!file) return;
+  try {
+    const json = JSON.parse(await file.text());
+    const name = file.name.replace(/\.json$/i, '');
+    customFonts[name] = json;
+    const sel = document.getElementById('selFont');
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = `Custom: ${name}`;
+    sel.appendChild(opt);
+    sel.value = name;
+    compilePaths();
+  } catch (err) {
+    alert('Invalid handwriting JSON file.');
+  }
+}
+
+async function loadUserFile(file) {
+  if (!file) return;
+  stopPenSimulation();
+  const fname = file.name.toLowerCase();
+  setStatus(`Extracting ${file.name}...`, 'busy');
+
+  if (fname.endsWith('.pdf')) {
+    const buffer = await file.arrayBuffer();
+    pdfDocument = await pdfjsLib.getDocument({ data: buffer }).promise;
+    pdfPageTotal = pdfDocument.numPages;
+    await renderPdfPage(1);
+  } else if (file.type.startsWith('image/') || /\.(png|jpg|jpeg|webp|bmp)$/i.test(fname)) {
+    pdfDocument = null;
+    updatePageUi(1, 1);
+    const img = new Image();
+    img.onload = () => {
+      cachedImageSource = img;
+      exactSpans = [];
+      document.getElementById('editor').value = '(Image / Sketch vectorized with tonal hatch shading)';
+      document.getElementById('chkExactLayout').checked = true;
+      extractSketchVectors(img, false);
+      compilePaths();
+    };
+    img.src = URL.createObjectURL(file);
+  } else {
+    pdfDocument = null;
+    updatePageUi(1, 1);
+    cachedImageSource = null;
+    exactSpans = [];
+    drawStrokes = [];
+    document.getElementById('chkExactLayout').checked = false;
+    document.getElementById('editor').value = await file.text();
+    compilePaths();
+  }
+}
+
+async function changePdfPage(step) {
+  const target = pdfPageNum + step;
+  if (pdfDocument && target >= 1 && target <= pdfPageTotal) {
+    await renderPdfPage(target);
+  }
+}
+
+function updatePageUi(curr, total) {
+  pdfPageNum = curr;
+  pdfPageTotal = total;
+  document.getElementById('lblPage').innerText = `Page ${curr} of ${total}`;
+  document.getElementById('btnPrev').disabled = curr <= 1;
+  document.getElementById('btnNext').disabled = curr >= total;
+}
+
+async function renderPdfPage(pageIndex) {
+  updatePageUi(pageIndex, pdfPageTotal);
+  const page = await pdfDocument.getPage(pageIndex);
+  const vp = page.getViewport({ scale: 1.0 });
+  const sx = 210.0 / vp.width;
+  const sy = 297.0 / vp.height;
+
+  const content = await page.getTextContent();
+  exactSpans = [];
+  const textLines = [];
+
+  for (const item of content.items) {
+    if (!item.str || !item.str.trim()) continue;
+    textLines.push(item.str);
+    exactSpans.push({
+      text: item.str,
+      x: item.transform[4] * sx,
+      y: (vp.height - item.transform[5]) * sy,
+      h: Math.max(3.5, Math.min(12.0, Math.abs(item.height || 10) * sy))
+    });
+  }
+
+  document.getElementById('editor').value = textLines.join('\n');
+  document.getElementById('chkExactLayout').checked = true;
+
+  const hiVp = page.getViewport({ scale: 2.0 });
+  const off = document.createElement('canvas');
+  off.width = hiVp.width;
+  off.height = hiVp.height;
+  const octx = off.getContext('2d');
+  await page.render({ canvasContext: octx, viewport: hiVp }).promise;
+
+  // Mask out text areas before vectorizing diagrams/tables
+  octx.fillStyle = '#ffffff';
+  for (const item of content.items) {
+    if (!item.str || !item.str.trim()) continue;
+    octx.fillRect(
+      item.transform[4] * 2.0 - 2,
+      (vp.height - item.transform[5]) * 2.0 - (item.height * 2.0) - 2,
+      (item.width * 2.0) + 6,
+      (item.height * 2.4) + 6
+    );
+  }
+
+  cachedImageSource = off;
+  extractSketchVectors(off, true);
+  compilePaths();
+}
+
+function onShadeSliderChange() {
+  const names = ['Off', 'Light', 'Medium', 'Dense'];
+  document.getElementById('valShade').innerText = names[document.getElementById('sldShade').value];
+  if (cachedImageSource) {
+    extractSketchVectors(cachedImageSource, pdfDocument !== null);
+    compilePaths();
+  }
+}
+
+// ==========================================================
+// VECTORIZER: CRISP OUTLINES + MULTI-TONE CROSS-HATCHING
+// ==========================================================
+function extractSketchVectors(imgSource, isFullPage) {
+  const shadeMode = parseInt(document.getElementById('sldShade').value);
+  const maxDim = 720;
+  const ratio = Math.min(1.0, maxDim / Math.max(imgSource.width, imgSource.height));
+  const w = Math.max(10, Math.round(imgSource.width * ratio));
+  const h = Math.max(10, Math.round(imgSource.height * ratio));
+
+  const tmp = document.createElement('canvas');
+  tmp.width = w; tmp.height = h;
+  const tctx = tmp.getContext('2d');
+  tctx.fillStyle = '#ffffff';
+  tctx.fillRect(0, 0, w, h);
+  tctx.drawImage(imgSource, 0, 0, w, h);
+
+  const rgba = tctx.getImageData(0, 0, w, h).data;
+  const gray = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    gray[i] = Math.round(0.299 * rgba[i * 4] + 0.587 * rgba[i * 4 + 1] + 0.114 * rgba[i * 4 + 2]);
+  }
+
+  const scale = isFullPage ? Math.min(210.0 / w, 297.0 / h) : Math.min(190.0 / w, 277.0 / h);
+  const ox = isFullPage ? 0 : (210.0 - w * scale) / 2.0;
+  const oy = isFullPage ? 0 : (297.0 - h * scale) / 2.0;
+
+  drawStrokes = [];
+
+  // 1. Dark Contour & Line-Art Tracing
+  const visited = new Uint8Array(w * h);
+  const isContour = (x, y) => {
+    if (x <= 0 || y <= 0 || x >= w - 1 || y >= h - 1) return false;
+    if (gray[y * w + x] > 140) return false;
+    return (
+      gray[y * w + x - 1] > 140 || gray[y * w + x + 1] > 140 ||
+      gray[(y - 1) * w + x] > 140 || gray[(y + 1) * w + x] > 140
+    );
+  };
+
+  const dirs = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1],[0,-1],[1,-1]];
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = y * w + x;
+      if (visited[idx] || !isContour(x, y)) continue;
+      const pts = [];
+      let cx = x, cy = y;
+      while (true) {
+        visited[cy * w + cx] = 1;
+        pts.push([ox + cx * scale, oy + cy * scale]);
+        let moved = false;
+        for (const [dx, dy] of dirs) {
+          const nx = cx + dx, ny = cy + dy;
+          if (!visited[ny * w + nx] && isContour(nx, ny)) {
+            cx = nx; cy = ny; moved = true; break;
+          }
+        }
+        if (!moved) break;
+      }
+      if (pts.length >= 2) drawStrokes.push(simplifyLine(pts, 0.22));
+    }
+  }
+
+  // 2. Multi-Tone Diagonal Cross-Hatching
+  if (shadeMode > 0) {
+    const mult = shadeMode === 1 ? 1.55 : (shadeMode === 2 ? 1.0 : 0.68);
+    scanHatch(gray, w, h, 170, 222, Math.max(3, Math.round((2.6 / scale) * mult)), 1, scale, ox, oy);
+    scanHatch(gray, w, h, 105, 170, Math.max(2, Math.round((1.5 / scale) * mult)), 1, scale, ox, oy);
+    scanHatch(gray, w, h, 0, 105, Math.max(2, Math.round((1.1 / scale) * mult)), 1, scale, ox, oy);
+    scanHatch(gray, w, h, 0, 105, Math.max(2, Math.round((1.3 / scale) * mult)), -1, scale, ox, oy);
+  }
+}
+
+function scanHatch(gray, w, h, minG, maxG, stepPx, dirSign, scale, ox, oy) {
+  const cStart = dirSign === 1 ? -h : 0;
+  const cEnd = dirSign === 1 ? w : w + h;
+
+  for (let c = cStart; c <= cEnd; c += stepPx) {
+    let p0 = null, p1 = null;
+    for (let y = 0; y < h; y++) {
+      const x = c + dirSign * y;
+      if (x >= 0 && x < w && gray[y * w + x] >= minG && gray[y * w + x] < maxG) {
+        const pt = [ox + x * scale, oy + y * scale];
+        if (!p0) p0 = pt;
+        p1 = pt;
+      } else {
+        if (p0 && p1 && Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > 0.6) drawStrokes.push([p0, p1]);
+        p0 = null;
+      }
+    }
+    if (p0 && p1 && Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > 0.6) drawStrokes.push([p0, p1]);
+  }
+}
+
+function simplifyLine(pts, tol) {
+  if (pts.length <= 2) return pts;
+  const out = [pts[0]];
+  let last = pts[0];
+  for (let i = 1; i < pts.length - 1; i++) {
+    if (Math.hypot(pts[i][0] - last[0], pts[i][1] - last[1]) >= tol) {
+      out.push(pts[i]);
+      last = pts[i];
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+// ==========================================================
+// COMPILE STROKES & G-CODE
+// ==========================================================
+function updateParamLabels() {
+  document.getElementById('valHeight').innerText = `${parseFloat(document.getElementById('sldHeight').value).toFixed(1)} mm`;
+  document.getElementById('valSlant').innerText = `${document.getElementById('sldSlant').value}%`;
+  document.getElementById('valServo').innerText = `${document.getElementById('sldServo').value}°`;
+  scheduleCompile();
+}
+
+function scheduleCompile() {
+  clearTimeout(compileDebounce);
+  compileDebounce = setTimeout(compilePaths, 180);
+}
+
+function compilePaths() {
+  const hMm = parseFloat(document.getElementById('sldHeight').value);
+  const slant = (parseFloat(document.getElementById('sldSlant').value) / 100.0) * 0.16;
+  const servo = parseInt(document.getElementById('sldServo').value);
+  const exactMode = document.getElementById('chkExactLayout').checked;
+  const fontChoice = document.getElementById('selFont').value;
+  const glyphSet = fontChoice === 'builtin' ? BASE_GLYPHS : (customFonts[fontChoice] || BASE_GLYPHS);
+
+  textStrokes = [];
+
+  const renderTextRun = (str, startX, baseY, size) => {
+    let cx = startX;
+    for (const ch of str) {
+      if (ch === ' ') { cx += size * 0.48; continue; }
+      const glyph = glyphSet[ch] || BASE_GLYPHS[ch] || BASE_GLYPHS[ch.toUpperCase()];
+      if (!glyph) { cx += size * 0.42; continue; }
+      let maxX = 0;
+      for (const s of glyph) {
+        const pts = s.map(([gx, gy]) => {
+          if (gx > maxX) maxX = gx;
+          return [cx + gx * size + gy * size * slant, baseY - gy * size];
+        });
+        if (pts.length > 1) textStrokes.push(pts);
+      }
+      cx += (maxX > 0 ? maxX * size : size * 0.4) + size * 0.14;
+    }
+  };
+
+  if (exactMode && exactSpans.length > 0) {
+    for (const item of exactSpans) {
+      renderTextRun(item.text, item.x, item.y, item.h * (hMm / 6.0));
+    }
+  } else {
+    const raw = document.getElementById('editor').value;
+    let cx = 22.0, cy = 30.0;
+    for (const ch of raw) {
+      if (ch === '\n') { cx = 22.0; cy += 10.0; continue; }
+      if (ch === ' ') { cx += hMm * 0.52; continue; }
+      const glyph = glyphSet[ch] || BASE_GLYPHS[ch] || BASE_GLYPHS[ch.toUpperCase()];
+      if (!glyph) { cx += hMm * 0.42; continue; }
+      let maxX = 0;
+      for (const s of glyph) {
+        const pts = s.map(([gx, gy]) => {
+          if (gx > maxX) maxX = gx;
+          return [cx + gx * hMm + gy * hMm * slant, cy - gy * hMm];
+        });
+        if (pts.length > 1) textStrokes.push(pts);
+      }
+      cx += (maxX > 0 ? maxX * hMm : hMm * 0.4) + hMm * 0.15;
+      if (cx > 195.0) { cx = 22.0; cy += 10.0; }
+    }
+  }
+
+  gcodeList = ['G21', 'G90', 'M3 S0', 'G0 X0.000 Y0.000 F3500'];
+  let totalDist = 0;
+
+  const pushLayer = (strokes, feed) => {
+    for (const s of strokes) {
+      if (s.length < 2) continue;
+      gcodeList.push('M3 S0', `G0 X${s[0][0].toFixed(3)} Y${s[0][1].toFixed(3)} F3500`, `M3 S${servo}`);
+      let lx = s[0][0], ly = s[0][1];
+      for (let i = 1; i < s.length; i++) {
+        const [px, py] = s[i];
+        const d = Math.hypot(px - lx, py - ly);
+        if (d < 0.05) continue;
+        totalDist += d;
+        gcodeList.push(`G1 X${px.toFixed(3)} Y${py.toFixed(3)} F${feed}`);
+        lx = px; ly = py;
+      }
+    }
+  };
+
+  if (document.getElementById('chkShowDraw').checked) pushLayer(drawStrokes, 1600);
+  if (document.getElementById('chkShowText').checked) pushLayer(textStrokes, 1800);
+  gcodeList.push('M3 S0', 'G0 X0.000 Y0.000 F3500');
+
+  const sec = Math.round((totalDist / 28.0) + (gcodeList.length * 0.015));
+  document.getElementById('statLines').innerText = gcodeList.length.toLocaleString();
+  document.getElementById('statTime').innerText = `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  if (!plottingActive) setStatus(`Ready • ${gcodeList.length} commands compiled`, portHandle ? 'online' : 'idle');
+
+  simProgress = 1.0;
+  drawSheet();
+}
+
+// ==========================================================
+// A4 SHEET RENDERER & PEN PATH SIMULATION
+// ==========================================================
+function drawSheet() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const wPx = 210 * viewZoom, hPx = 297 * viewZoom;
+
+  // Architectural Drop Shadow & Paper Sheet
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
+  ctx.fillRect(viewPanX + 8, viewPanY + 10, wPx, hPx);
+  ctx.fillStyle = '#fffdf9';
+  ctx.fillRect(viewPanX, viewPanY, wPx, hPx);
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(viewPanX, viewPanY, wPx, hPx);
+
+  // Notebook Ruling (when not in 1:1 exact mode)
+  if (!document.getElementById('chkExactLayout').checked) {
+    ctx.strokeStyle = '#fda4af';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(viewPanX + 20 * viewZoom, viewPanY);
+    ctx.lineTo(viewPanX + 20 * viewZoom, viewPanY + hPx);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#bae6fd';
+    for (let y = 30; y < 290; y += 10) {
+      ctx.beginPath();
+      ctx.moveTo(viewPanX, viewPanY + y * viewZoom);
+      ctx.lineTo(viewPanX + wPx, viewPanY + y * viewZoom);
+      ctx.stroke();
+    }
+  }
+
+  // Combine visible strokes for rendering / simulation
+  const combined = [];
+  if (document.getElementById('chkShowDraw').checked) combined.push(...drawStrokes);
+  if (document.getElementById('chkShowText').checked) combined.push(...textStrokes);
+
+  const limitCount = Math.floor(combined.length * simProgress);
+
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(0.85, 0.52 * viewZoom);
+
+  ctx.beginPath();
+  for (let idx = 0; idx < limitCount; idx++) {
+    const s = combined[idx];
+    if (s.length < 2) continue;
+    ctx.moveTo(viewPanX + s[0][0] * viewZoom, viewPanY + s[0][1] * viewZoom);
+    for (let i = 1; i < s.length; i++) {
+      ctx.lineTo(viewPanX + s[i][0] * viewZoom, viewPanY + s[i][1] * viewZoom);
+    }
+  }
+  ctx.stroke();
+
+  // Draw live Pen Nib indicator during simulation
+  if (simProgress < 1.0 && limitCount > 0) {
+    const lastStroke = combined[limitCount - 1];
+    const tip = lastStroke[lastStroke.length - 1];
+    const tx = viewPanX + tip[0] * viewZoom;
+    const ty = viewPanY + tip[1] * viewZoom;
+    ctx.fillStyle = '#d97706';
+    ctx.beginPath();
+    ctx.arc(tx, ty, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function togglePenSimulation() {
+  if (simTimer) {
+    stopPenSimulation();
+    simProgress = 1.0;
+    drawSheet();
+    return;
+  }
+  simProgress = 0.0;
+  document.getElementById('btnSim').innerText = '■ Stop Sim';
+  simTimer = setInterval(() => {
+    simProgress += 0.015;
+    if (simProgress >= 1.0) {
+      stopPenSimulation();
+      simProgress = 1.0;
+    }
+    drawSheet();
+  }, 25);
+}
+
+function stopPenSimulation() {
+  if (simTimer) { clearInterval(simTimer); simTimer = null; }
+  document.getElementById('btnSim').innerText = '▶ Simulate Pen';
+}
+
+function zoomSheet(factor) { viewZoom = Math.max(0.7, Math.min(12, viewZoom * factor)); drawSheet(); }
+function resetSheetView() {
+  const stageH = canvas.parentElement.clientHeight || 600;
+  const stageW = canvas.parentElement.clientWidth || 700;
+  viewZoom = Math.max(1.2, (stageH - 80) / 297.0);
+  viewPanX = (stageW - 210 * viewZoom) / 2;
+  viewPanY = 24;
+  drawSheet();
+}
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.15 : 0.87;
+  const oldZ = viewZoom;
+  viewZoom = Math.max(0.7, Math.min(12, viewZoom * factor));
+  viewPanX = e.offsetX - (e.offsetX - viewPanX) * (viewZoom / oldZ);
+  viewPanY = e.offsetY - (e.offsetY - viewPanY) * (viewZoom / oldZ);
+  drawSheet();
+});
+
+canvas.addEventListener('mousedown', (e) => { isPanning = true; panStartX = e.clientX - viewPanX; panStartY = e.clientY - viewPanY; });
+window.addEventListener('mouseup', () => { isPanning = false; });
+canvas.addEventListener('mousemove', (e) => {
+  if (isPanning) { viewPanX = e.clientX - panStartX; viewPanY = e.clientY - panStartY; drawSheet(); }
+  const mx = ((e.offsetX - viewPanX) / viewZoom).toFixed(1);
+  const my = ((e.offsetY - viewPanY) / viewZoom).toFixed(1);
+  document.getElementById('coordHud').innerText = `X: ${mx} mm  Y: ${my} mm  |  ${Math.round((viewZoom / 1.9) * 100)}%`;
+});
+
+// ==========================================================
+// EXPORT GCODE & WEB SERIAL USB STREAMING
+// ==========================================================
+function exportGcodeFile() {
+  if (!gcodeList.length) compilePaths();
+  const blob = new Blob([gcodeList.join('\n')], { type: 'text/plain' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = 'draftmate_a4_plot.gcode';
+  link.click();
+}
+
+async function connectArduinoUsb() {
+  if (!('serial' in navigator)) {
+    alert('Web Serial requires desktop Google Chrome or Microsoft Edge.');
+    return;
+  }
+  if (portHandle) {
+    try { if (portWriter) portWriter.releaseLock(); await portHandle.close(); } catch (_) {}
+    portHandle = null; portWriter = null;
+    document.getElementById('btnUsb').innerText = '🔌 Connect USB';
+    setStatus('Disconnected from USB', 'idle');
+    return;
+  }
+  try {
+    portHandle = await navigator.serial.requestPort();
+    await portHandle.open({ baudRate: 115200 });
+    portWriter = portHandle.writable.getWriter();
+    document.getElementById('btnUsb').innerText = '🔌 Disconnect';
+    setStatus('Arduino Connected (115200 baud)', 'online');
+  } catch (err) {
+    setStatus('USB Connection Cancelled', 'idle');
+  }
+}
+
+async function runPlotter() {
+  if (!gcodeList.length) compilePaths();
+  if (!portWriter) {
+    alert('Please click "🔌 Connect USB" first, or use "⬇ Export .GCODE".');
+    return;
+  }
+  plottingActive = true;
+  abortPlot = false;
+  document.getElementById('btnRun').disabled = true;
+  document.getElementById('btnStop').disabled = false;
+
+  const enc = new TextEncoder();
+  const total = gcodeList.length;
+
+  for (let i = 0; i < total; i++) {
+    if (abortPlot) {
+      await portWriter.write(enc.encode('M3 S0\n'));
+      setStatus('Emergency Stopped', 'idle');
+      break;
+    }
+    await portWriter.write(enc.encode(gcodeList[i] + '\n'));
+    await new Promise(r => setTimeout(r, 12));
+    const pct = Math.round(((i + 1) / total) * 100);
+    document.getElementById('progFill').style.width = `${pct}%`;
+    setStatus(`Plotting • ${pct}% (${i + 1}/${total})`, 'busy');
+  }
+
+  plottingActive = false;
+  document.getElementById('btnRun').disabled = false;
+  document.getElementById('btnStop').disabled = true;
+  if (!abortPlot) setStatus('Completed A4 Plot!', 'online');
+}
+
+function haltPlotter() { abortPlot = true; }
+
+function setStatus(text, mode) {
+  document.getElementById('statusText').innerText = text;
+  const dot = document.getElementById('statusDot');
+  dot.className = 'dot' + (mode === 'online' ? ' online' : (mode === 'busy' ? ' busy' : ''));
+}
+</script>
+</body>
+</html>
