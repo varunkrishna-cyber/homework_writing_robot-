@@ -1,28 +1,51 @@
 import math
 import os
+
 import cv2
 import docx
 import fitz  # PyMuPDF
 import numpy as np
 from PIL import Image
-from skimage.morphology import skeletonize
+
+try:
+    from skimage.morphology import skeletonize
+    HAS_SKIMAGE = True
+except ImportError:
+    HAS_SKIMAGE = False
 
 try:
     import pytesseract
-    default_tess = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(default_tess):
-        pytesseract.pytesseract.tesseract_cmd = default_tess
+
+    if os.path.exists(r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     HAS_TESSERACT = True
 except ImportError:
     HAS_TESSERACT = False
 
 
+def _fast_skeletonize(binary_bool):
+    if HAS_SKIMAGE:
+        return skeletonize(binary_bool).astype(np.uint8)
+    img = (binary_bool.astype(np.uint8)) * 255
+    skel = np.zeros_like(img)
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    while True:
+        eroded = cv2.erode(img, element)
+        temp = cv2.dilate(eroded, element)
+        temp = cv2.subtract(img, temp)
+        skel = cv2.bitwise_or(skel, temp)
+        img = eroded.copy()
+        if cv2.countNonZero(img) == 0:
+            break
+    return (skel > 0).astype(np.uint8)
+
+
 class UniversalDocumentExtractor:
     """
-    1:1 Exact Drawing + Tonal Shading Extractor:
-    - Traces crisp outlines and fine sketch lines using directional momentum.
-    - Converts gray shadows and pencil shading into multi-density 45° / -45° cross-hatching
-      so a pen plotter reproduces light, medium, and dark shading faithfully.
+    Universal Document & Sketch Vectorizer for Pen Plotters:
+    - Extracts exact text coordinates from PDFs, DOCX, TXT, and images.
+    - Separates tables, crisp outlines, and multi-tone cross-hatch shading.
+    - Isolated add-on for human-written notes + circuit diagrams.
     """
 
     A4_W = 210.0
@@ -31,14 +54,13 @@ class UniversalDocumentExtractor:
     @classmethod
     def extract_file(cls, file_path, page_num=0):
         ext = os.path.splitext(file_path)[1].lower()
-
         if ext == ".pdf":
             return cls._extract_pdf(file_path, page_num)
-        elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff"):
-            return cls._extract_image(file_path)
         elif ext == ".docx":
             return cls._extract_docx(file_path)
-        elif ext == ".txt":
+        elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            return cls._extract_image(file_path)
+        else:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 txt = f.read()
             return {
@@ -47,132 +69,69 @@ class UniversalDocumentExtractor:
                 "table_lines_mm": [],
                 "diagram_strokes_mm": [],
                 "total_pages": 1,
-                "is_exact_layout": False
+                "is_exact_layout": False,
             }
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
 
-    # ==========================================================
-    # 1. PDF EXTRACTOR
-    # ==========================================================
     @classmethod
-    def _extract_pdf(cls, pdf_path, page_num=0):
-        doc = fitz.open(pdf_path)
+    def _extract_pdf(cls, file_path, page_num=0):
+        doc = fitz.open(file_path)
         total_pages = len(doc)
         page_num = max(0, min(page_num, total_pages - 1))
         page = doc[page_num]
 
-        pdf_w = max(page.rect.width, 1)
-        pdf_h = max(page.rect.height, 1)
-        scale_x = cls.A4_W / pdf_w
-        scale_y = cls.A4_H / pdf_h
+        rect = page.rect
+        sx = cls.A4_W / max(rect.width, 1.0)
+        sy = cls.A4_H / max(rect.height, 1.0)
 
         text_items = []
         plain_lines = []
-        text_dict = page.get_text("dict")
+        mask_boxes = []
 
-        for block in text_dict.get("blocks", []):
-            if block.get("type") != 0:
+        blocks = page.get_text("dict").get("blocks", [])
+        for b in blocks:
+            if b.get("type") != 0:
                 continue
-            for line in block.get("lines", []):
-                spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
-                if not spans:
-                    continue
-                full_line_text = "".join(s["text"] for s in spans).strip()
-                if not full_line_text:
-                    continue
-                plain_lines.append(full_line_text)
-                first_span = spans[0]
-                ox, oy = first_span["origin"]
-                avg_pt = sum(s.get("size", 11.0) for s in spans) / len(spans)
-                text_items.append({
-                    "text": full_line_text,
-                    "x_mm": ox * scale_x,
-                    "y_mm": oy * scale_y,
-                    "height_mm": max(3.4, min(12.0, avg_pt * 0.3528 * scale_x))
-                })
-
-        table_lines_mm = []
-        table_bboxes = []
-        try:
-            tabs = page.find_tables()
-            for tab in tabs.tables:
-                table_bboxes.append(fitz.Rect(tab.bbox))
-                for cell in tab.cells:
-                    if cell is None:
+            for line in b.get("lines", []):
+                line_strs = []
+                for span in line.get("spans", []):
+                    s = span.get("text", "").strip()
+                    if not s:
                         continue
-                    cx0, cy0, cx1, cy1 = cell
-                    x0, y0 = cx0 * scale_x, cy0 * scale_y
-                    x1, y1 = cx1 * scale_x, cy1 * scale_y
-                    table_lines_mm.append([(x0, y0), (x1, y0)])
-                    table_lines_mm.append([(x1, y0), (x1, y1)])
-                    table_lines_mm.append([(x1, y1), (x0, y1)])
-                    table_lines_mm.append([(x0, y1), (x0, y0)])
-        except Exception:
-            pass
+                    line_strs.append(s)
+                    bbox = span["bbox"]
+                    mask_boxes.append(bbox)
+                    h_mm = max(3.5, min(12.0, (bbox[3] - bbox[1]) * sy * 0.85))
+                    text_items.append({
+                        "text": s,
+                        "x_mm": bbox[0] * sx,
+                        "y_mm": bbox[3] * sy,
+                        "height_mm": h_mm,
+                    })
+                if line_strs:
+                    plain_lines.append(" ".join(line_strs))
 
-        table_lines_mm = cls._deduplicate_segments(table_lines_mm)
+        dpi_scale = 200.0 / 72.0
+        pix = page.get_pixmap(dpi=200)
+        img_rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:
+            img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_RGBA2RGB)
+        else:
+            img_rgb = img_rgb.copy()
 
-        diagram_strokes_mm = []
-        for path in page.get_drawings():
-            has_stroke = path.get("color") is not None
-            path_rect = path.get("rect")
-            if path_rect and any(tb.contains(path_rect) for tb in table_bboxes):
-                continue
-
-            for item in path.get("items", []):
-                op = item[0]
-                if op == "l" and has_stroke:
-                    p1, p2 = item[1], item[2]
-                    x1, y1 = p1.x * scale_x, p1.y * scale_y
-                    x2, y2 = p2.x * scale_x, p2.y * scale_y
-                    diagram_strokes_mm.append([(x1, y1), (x2, y2)])
-
-                elif op == "re" and has_stroke:
-                    rect = item[1]
-                    x0, y0 = rect.x0 * scale_x, rect.y0 * scale_y
-                    x1, y1 = rect.x1 * scale_x, rect.y1 * scale_y
-                    if abs(x1 - x0) > 202 and abs(y1 - y0) > 288:
-                        continue
-                    diagram_strokes_mm.append([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)])
-
-                elif op == "c" and has_stroke:
-                    p0, p1, p2, p3 = item[1], item[2], item[3], item[4]
-                    curve_pts = []
-                    for step in range(21):
-                        t = step / 20.0
-                        mt = 1.0 - t
-                        bx = (mt**3)*p0.x + 3*(mt**2)*t*p1.x + 3*mt*(t**2)*p2.x + (t**3)*p3.x
-                        by = (mt**3)*p0.y + 3*(mt**2)*t*p1.y + 3*mt*(t**2)*p2.y + (t**3)*p3.y
-                        curve_pts.append((bx * scale_x, by * scale_y))
-                    diagram_strokes_mm.append(curve_pts)
-
-        for img_info in page.get_images(full=True):
-            xref = img_info[0]
-            rects = page.get_image_rects(xref)
-            if not rects:
-                continue
-            rect = rects[0]
-            if rect.width < 25 or rect.height < 25:
-                continue
-
-            base_img = doc.extract_image(xref)
-            img_arr = np.frombuffer(base_img["image"], dtype=np.uint8)
-            bgr = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
-            if bgr is None:
-                continue
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-            r_diags = cls._vectorize_shaded_sketch(
-                rgb,
-                target_w=rect.width * scale_x,
-                target_h=rect.height * scale_y,
-                offset_x=rect.x0 * scale_x,
-                offset_y=rect.y0 * scale_y
+        for x0, y0, x1, y1 in mask_boxes:
+            cv2.rectangle(
+                img_rgb,
+                (max(0, int(x0 * dpi_scale) - 3), max(0, int(y0 * dpi_scale) - 3)),
+                (min(img_rgb.shape[1], int(x1 * dpi_scale) + 3), min(img_rgb.shape[0], int(y1 * dpi_scale) + 3)),
+                (255, 255, 255),
+                -1,
             )
-            diagram_strokes_mm.extend(r_diags)
 
         doc.close()
+
+        table_lines_mm, diagram_strokes_mm = cls._vectorize_raster_with_shading(
+            img_rgb, target_w=cls.A4_W, target_h=cls.A4_H, offset_x=0.0, offset_y=0.0
+        )
 
         return {
             "plain_text": "\n".join(plain_lines),
@@ -180,42 +139,104 @@ class UniversalDocumentExtractor:
             "table_lines_mm": table_lines_mm,
             "diagram_strokes_mm": diagram_strokes_mm,
             "total_pages": total_pages,
-            "is_exact_layout": True
+            "is_exact_layout": True,
         }
 
-    # ==========================================================
-    # 2. IMAGE / SKETCH EXTRACTOR (Outlines + Multi-Tone Shading)
-    # ==========================================================
     @classmethod
-    def _extract_image(cls, img_path):
-        pil_img = Image.open(img_path).convert("RGB")
+    def _extract_docx(cls, file_path):
+        d = docx.Document(file_path)
+        lines = [p.text for p in d.paragraphs if p.text.strip()]
+        for tbl in d.tables:
+            for row in tbl.rows:
+                lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+        return {
+            "plain_text": "\n\n".join(lines),
+            "text_items": [],
+            "table_lines_mm": [],
+            "diagram_strokes_mm": [],
+            "total_pages": 1,
+            "is_exact_layout": False,
+        }
+
+    @classmethod
+    def _extract_image(cls, file_path):
+        pil_img = Image.open(file_path).convert("RGB")
         img_rgb = np.array(pil_img)
         h, w = img_rgb.shape[:2]
 
-        if max(w, h) < 1200:
+        avail_w, avail_h = cls.A4_W - 20.0, cls.A4_H - 20.0
+        scale = min(avail_w / max(w, 1), avail_h / max(h, 1))
+        target_w, target_h = w * scale, h * scale
+        offset_x = (cls.A4_W - target_w) / 2.0
+        offset_y = (cls.A4_H - target_h) / 2.0
+
+        table_lines_mm, diagram_strokes_mm = cls._vectorize_raster_with_shading(
+            img_rgb, target_w=target_w, target_h=target_h, offset_x=offset_x, offset_y=offset_y
+        )
+
+        return {
+            "plain_text": "(Image / Sketch vectorized with tonal hatch shading)",
+            "text_items": [],
+            "table_lines_mm": table_lines_mm,
+            "diagram_strokes_mm": diagram_strokes_mm,
+            "total_pages": 1,
+            "is_exact_layout": True,
+        }
+
+    @classmethod
+    def extract_handwritten_notes(cls, file_path, page_num=0):
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".pdf":
+            doc = fitz.open(file_path)
+            total_pages = len(doc)
+            page_num = max(0, min(page_num, total_pages - 1))
+            pix = doc[page_num].get_pixmap(dpi=220)
+            img_rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_RGBA2RGB)
+            doc.close()
+        else:
+            pil_img = Image.open(file_path).convert("RGB")
+            img_rgb = np.array(pil_img)
+            total_pages = 1
+
+        h, w = img_rgb.shape[:2]
+        if max(w, h) < 1400:
             img_rgb = cv2.resize(img_rgb, (w * 2, h * 2), interpolation=cv2.INTER_LANCZOS4)
-            pil_img = Image.fromarray(img_rgb)
             h, w = img_rgb.shape[:2]
 
-        avail_w = cls.A4_W - 20.0
-        avail_h = cls.A4_H - 20.0
+        avail_w, avail_h = cls.A4_W - 20.0, cls.A4_H - 20.0
         scale = min(avail_w / max(w, 1), avail_h / max(h, 1))
         offset_x = (cls.A4_W - (w * scale)) / 2.0
         offset_y = (cls.A4_H - (h * scale)) / 2.0
 
+        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        ink_mask = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 15
+        )
+        horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(40, int(w * 0.45)), 1))
+        notebook_rules = cv2.morphologyEx(ink_mask, cv2.MORPH_OPEN, horiz_kernel)
+        clean_ink = cv2.subtract(ink_mask, notebook_rules)
+
+        clean_rgb = np.full_like(img_rgb, 255)
+        clean_rgb[clean_ink > 0] = (0, 0, 0)
+        circuit_only_rgb = clean_rgb.copy()
+
         text_items = []
         plain_lines = []
-        graphics_mask_img = img_rgb.copy()
 
         if HAS_TESSERACT:
             try:
-                ocr_data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+                pil_clean = Image.fromarray(clean_rgb)
+                ocr_data = pytesseract.image_to_data(
+                    pil_clean, config="--psm 6", output_type=pytesseract.Output.DICT
+                )
                 lines_map = {}
 
                 for i in range(len(ocr_data["text"])):
                     word = ocr_data["text"][i].strip()
                     conf = int(ocr_data["conf"][i]) if str(ocr_data["conf"][i]).isdigit() else -1
-                    if len(word) < 2 or not any(c.isalpha() for c in word) or conf < 78:
+                    if len(word) < 2 or not any(c.isalnum() for c in word) or conf < 45:
                         continue
 
                     bx, by, bw, bh = (
@@ -224,12 +245,17 @@ class UniversalDocumentExtractor:
                         ocr_data["width"][i],
                         ocr_data["height"][i],
                     )
+                    if bh > h * 0.08 or bw > w * 0.65:
+                        continue
 
-                    pad = 2
-                    y1, y2 = max(0, by - pad), min(h, by + bh + pad)
-                    x1, x2 = max(0, bx - pad), min(w, bx + bw + pad)
-                    bg_color = tuple(int(c) for c in np.median(img_rgb[y1:y2, x1:x2].reshape(-1, 3), axis=0))
-                    cv2.rectangle(graphics_mask_img, (x1, y1), (x2, y2), bg_color, -1)
+                    pad = 4
+                    cv2.rectangle(
+                        circuit_only_rgb,
+                        (max(0, bx - pad), max(0, by - pad)),
+                        (min(w, bx + bw + pad), min(h, by + bh + pad)),
+                        (255, 255, 255),
+                        -1,
+                    )
 
                     line_key = (ocr_data["block_num"][i], ocr_data["line_num"][i])
                     lines_map.setdefault(line_key, []).append((bx, by, bw, bh, word))
@@ -238,346 +264,154 @@ class UniversalDocumentExtractor:
                     line_words.sort(key=lambda item: item[0])
                     full_txt = " ".join(item[4] for item in line_words)
                     plain_lines.append(full_txt)
-                    bx0, by0, _, bh0, _ = line_words[0]
+                    bx0, by0, _, _, _ = line_words[0]
                     avg_h = sum(item[3] for item in line_words) / len(line_words)
                     text_items.append({
                         "text": full_txt,
                         "x_mm": offset_x + (bx0 * scale),
                         "y_mm": offset_y + ((by0 + avg_h * 0.85) * scale),
-                        "height_mm": max(3.5, min(12.0, avg_h * scale * 0.9))
+                        "height_mm": max(4.0, min(11.0, avg_h * scale * 0.85)),
                     })
             except Exception:
                 pass
 
-        diagram_strokes_mm = cls._vectorize_shaded_sketch(
-            graphics_mask_img,
+        circuit_strokes_mm = cls._vectorize_circuit_layer(
+            circuit_only_rgb,
             target_w=(w * scale),
             target_h=(h * scale),
             offset_x=offset_x,
-            offset_y=offset_y
+            offset_y=offset_y,
         )
 
         return {
-            "plain_text": "\n".join(plain_lines) if plain_lines else "(Sketch outlines + tonal shading vectorized)",
+            "plain_text": "\n".join(plain_lines) if plain_lines else "(Handwritten circuit diagram extracted)",
             "text_items": text_items,
             "table_lines_mm": [],
-            "diagram_strokes_mm": diagram_strokes_mm,
-            "total_pages": 1,
-            "is_exact_layout": True
+            "diagram_strokes_mm": circuit_strokes_mm,
+            "total_pages": total_pages,
+            "is_exact_layout": True,
         }
 
-    # ==========================================================
-    # 3. WORD (.DOCX) EXTRACTOR
-    # ==========================================================
     @classmethod
-    def _extract_docx(cls, docx_path):
-        doc = docx.Document(docx_path)
-        text_items = []
-        table_lines_mm = []
-        plain_lines = []
-
-        cursor_x = 22.0
-        cursor_y = 28.0
-        line_h = 8.5
-
-        for para in doc.paragraphs:
-            txt = para.text.strip()
-            if not txt:
-                cursor_y += line_h * 0.7
-                continue
-            plain_lines.append(txt)
-
-            words = txt.split(" ")
-            curr_line = ""
-            for w in words:
-                test = (curr_line + " " + w).strip()
-                if len(test) * 2.6 > 170.0 and curr_line:
-                    text_items.append({"text": curr_line, "x_mm": cursor_x, "y_mm": cursor_y, "height_mm": 5.5})
-                    cursor_y += line_h
-                    curr_line = w
-                else:
-                    curr_line = test
-            if curr_line:
-                text_items.append({"text": curr_line, "x_mm": cursor_x, "y_mm": cursor_y, "height_mm": 5.5})
-                cursor_y += line_h
-
-        for table in doc.tables:
-            num_rows = len(table.rows)
-            num_cols = len(table.columns)
-            if num_rows == 0 or num_cols == 0:
-                continue
-
-            cursor_y += 4.0
-            table_w = 170.0
-            col_w = table_w / num_cols
-            row_h = 10.0
-            start_y = cursor_y
-
-            for r in range(num_rows + 1):
-                y = start_y + r * row_h
-                table_lines_mm.append([(cursor_x, y), (cursor_x + table_w, y)])
-
-            for c in range(num_cols + 1):
-                x = cursor_x + c * col_w
-                table_lines_mm.append([(x, start_y), (x, start_y + num_rows * row_h)])
-
-            for r_idx, row in enumerate(table.rows):
-                row_texts = []
-                for c_idx, cell in enumerate(row.cells):
-                    cell_txt = cell.text.strip().replace("\n", " ")
-                    row_texts.append(cell_txt)
-                    if cell_txt:
-                        text_items.append({
-                            "text": cell_txt[:28],
-                            "x_mm": cursor_x + c_idx * col_w + 2.0,
-                            "y_mm": start_y + (r_idx + 0.72) * row_h,
-                            "height_mm": 4.8
-                        })
-                plain_lines.append(" | ".join(row_texts))
-
-            cursor_y = start_y + num_rows * row_h + 10.0
-
-        return {
-            "plain_text": "\n".join(plain_lines),
-            "text_items": text_items,
-            "table_lines_mm": table_lines_mm,
-            "diagram_strokes_mm": [],
-            "total_pages": 1,
-            "is_exact_layout": True
-        }
-
-    # ==========================================================
-    # 4. LINE-ART + TONAL HATCH SHADING VECTORIZER
-    # ==========================================================
-    @staticmethod
-    def _deduplicate_segments(segments, tol=0.4):
-        unique = []
-        for seg in segments:
-            (x1, y1), (x2, y2) = seg[0], seg[-1]
-            if math.hypot(x2 - x1, y2 - y1) < 1.0:
-                continue
-            p_a = (round(x1 / tol), round(y1 / tol))
-            p_b = (round(x2 / tol), round(y2 / tol))
-            key = tuple(sorted([p_a, p_b]))
-            if not any(u[0] == key for u in unique):
-                unique.append((key, [(x1, y1), (x2, y2)]))
-        return [u[1] for u in unique]
-
-    @classmethod
-    def _vectorize_shaded_sketch(cls, img_rgb, target_w=210.0, target_h=297.0, offset_x=0.0, offset_y=0.0):
-        """
-        1. Extracts all dark outlines and fine sketch lines first.
-        2. Detects light, medium, and dark gray shading regions and fills them with
-           clipped 45° / -45° cross-hatch strokes so the pen plotter shades shadows naturally.
-        """
+    def _vectorize_circuit_layer(cls, img_rgb, target_w=210.0, target_h=297.0, offset_x=0.0, offset_y=0.0):
         h, w = img_rgb.shape[:2]
         gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-
-        # Normalize paper background brightness so off-white paper doesn't trigger false shading
-        bg_estimate = cv2.GaussianBlur(gray, (51, 51), 0)
-        norm_gray = np.clip(255.0 * (gray.astype(np.float32) / np.maximum(bg_estimate.astype(np.float32), 1.0)), 0, 255).astype(np.uint8)
+        _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
 
         sx = target_w / max(w, 1)
         sy = target_h / max(h, 1)
         strokes_mm = []
 
-        # --- PASS 1: Crisp Outlines & Fine Pencil Lines (Adaptive Local Contrast) ---
-        line_binary = cv2.adaptiveThreshold(
-            norm_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 12
-        )
+        if not np.any(binary):
+            return strokes_mm
 
-        # Separate solid dark fills (> 7px thick) from thin pencil lines
-        solid_core = cv2.erode(line_binary, np.ones((7, 7), np.uint8))
-        solid_regions = cv2.dilate(solid_core, np.ones((9, 9), np.uint8))
-        solid_regions = cv2.bitwise_and(line_binary, solid_regions)
-        thin_lines = cv2.subtract(line_binary, solid_regions)
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        skel = _fast_skeletonize(closed > 0)
 
-        if np.any(solid_regions):
-            contours, _ = cv2.findContours(solid_regions, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-            for cnt in contours:
-                if cv2.arcLength(cnt, True) < 8:
-                    continue
-                approx = cv2.approxPolyDP(cnt, epsilon=0.75, closed=True)
-                if len(approx) >= 3:
-                    pts_mm = [(offset_x + float(p[0][0]) * sx, offset_y + float(p[0][1]) * sy) for p in approx]
-                    pts_mm.append(pts_mm[0])
-                    strokes_mm.append(pts_mm)
-
-        if np.any(thin_lines):
-            line_closed = cv2.morphologyEx(thin_lines, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-            skel = skeletonize(line_closed > 0).astype(np.uint8)
-            for stroke in cls._trace_momentum_skeleton(skel):
-                pts_mm = [(offset_x + x * sx, offset_y + y * sy) for x, y in stroke]
-                strokes_mm.append(pts_mm)
-
-        # --- PASS 2: Multi-Tone Hatch Shading for Gray Shadows ---
-        # Smooth out fine pencil texture to capture clean shadow zones
-        tone_map = cv2.GaussianBlur(norm_gray, (7, 7), 0)
-
-        # Tone 1: Light Shading (175 <= tone < 228) -> wide 45° hatches (2.5 mm spacing)
-        light_mask = ((tone_map >= 175) & (tone_map < 228)).astype(np.uint8) * 255
-        light_mask = cv2.morphologyEx(light_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        strokes_mm.extend(cls._generate_hatch_lines(light_mask, spacing_mm=2.5, angle_deg=45, sx=sx, sy=sy, ox=offset_x, oy=offset_y))
-
-        # Tone 2: Medium Shading (110 <= tone < 175) -> medium 45° hatches (1.35 mm spacing)
-        med_mask = ((tone_map >= 110) & (tone_map < 175)).astype(np.uint8) * 255
-        med_mask = cv2.morphologyEx(med_mask, cv2.MORPH_OPEN, np.ones((4, 4), np.uint8))
-        strokes_mm.extend(cls._generate_hatch_lines(med_mask, spacing_mm=1.35, angle_deg=45, sx=sx, sy=sy, ox=offset_x, oy=offset_y))
-
-        # Tone 3: Dark Shadow / Solid Fill (tone < 110) -> cross-hatched 45° + -45° (0.95 mm spacing)
-        dark_mask = (tone_map < 110).astype(np.uint8) * 255
-        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        strokes_mm.extend(cls._generate_hatch_lines(dark_mask, spacing_mm=0.95, angle_deg=45, sx=sx, sy=sy, ox=offset_x, oy=offset_y))
-        strokes_mm.extend(cls._generate_hatch_lines(dark_mask, spacing_mm=1.15, angle_deg=-45, sx=sx, sy=sy, ox=offset_x, oy=offset_y))
+        for stroke in cls._trace_momentum_skeleton(skel):
+            pts_mm = [(offset_x + x * sx, offset_y + y * sy) for x, y in stroke]
+            strokes_mm.append(pts_mm)
 
         return strokes_mm
 
-    @staticmethod
-    def _generate_hatch_lines(mask, spacing_mm, angle_deg, sx, sy, ox, oy):
-        """
-        Generates parallel diagonal hatch strokes clipped strictly inside the white pixels
-        of `mask` at the requested millimeter spacing and angle.
-        """
-        if not np.any(mask):
-            return []
+    @classmethod
+    def _vectorize_raster_with_shading(cls, img_rgb, target_w=210.0, target_h=297.0, offset_x=0.0, offset_y=0.0):
+        h, w = img_rgb.shape[:2]
+        max_dim = 950
+        if max(w, h) > max_dim:
+            r = max_dim / max(w, h)
+            w, h = max(10, int(w * r)), max(10, int(h * r))
+            img_rgb = cv2.resize(img_rgb, (w, h), interpolation=cv2.INTER_AREA)
 
-        h, w = mask.shape
-        # Rotate mask so diagonal hatching becomes simple horizontal scanlines
-        center = (w / 2.0, h / 2.0)
-        rot_mat = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
-        inv_rot_mat = cv2.getRotationMatrix2D(center, -angle_deg, 1.0)
+        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        sx = target_w / max(w, 1)
+        sy = target_h / max(h, 1)
 
-        diag = int(math.hypot(w, h)) + 4
-        rot_mat[0, 2] += (diag - w) / 2.0
-        rot_mat[1, 2] += (diag - h) / 2.0
-        inv_rot_mat[0, 2] = w / 2.0 - (diag / 2.0) * inv_rot_mat[0, 0] - (diag / 2.0) * inv_rot_mat[0, 1]
-        inv_rot_mat[1, 2] = h / 2.0 - (diag / 2.0) * inv_rot_mat[1, 0] - (diag / 2.0) * inv_rot_mat[1, 1]
+        table_lines_mm = []
+        diagram_strokes_mm = []
 
-        rot_mask = cv2.warpAffine(mask, rot_mat, (diag, diag), flags=cv2.INTER_NEAREST)
-
-        step_px = max(2, int(round(spacing_mm / max(sy, 1e-4))))
-        hatch_strokes = []
-
-        for y in range(0, diag, step_px):
-            row = rot_mask[y, :]
-            if not np.any(row):
-                continue
-
-            # Find contiguous runs of shaded pixels along scanline y
-            padded = np.concatenate(([0], (row > 0).astype(np.uint8), [0]))
-            diffs = np.diff(padded)
-            starts = np.where(diffs == 1)[0]
-            ends = np.where(diffs == -1)[0]
-
-            for x_start, x_end in zip(starts, ends):
-                if (x_end - x_start) < 3:  # Skip tiny 1-2px noise dots
+        _, dark_bin = cv2.threshold(gray, 135, 255, cv2.THRESH_BINARY_INV)
+        if np.any(dark_bin):
+            contours, _ = cv2.findContours(dark_bin, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                if cv2.arcLength(cnt, False) < 6:
                     continue
+                approx = cv2.approxPolyDP(cnt, 0.75, False)
+                pts = [(offset_x + float(p[0][0]) * sx, offset_y + float(p[0][1]) * sy) for p in approx]
+                if len(pts) >= 2:
+                    diagram_strokes_mm.append(pts)
 
-                # Map endpoints back to original image coordinates
-                p0_rot = np.array([x_start, y, 1.0])
-                p1_rot = np.array([x_end - 1, y, 1.0])
-                x0, y0 = inv_rot_mat @ p0_rot
-                x1, y1 = inv_rot_mat @ p1_rot
+        cls._add_hatch_band(gray, 175, 225, max(4, int(2.6 / sx)), 1, sx, sy, offset_x, offset_y, diagram_strokes_mm)
+        cls._add_hatch_band(gray, 110, 175, max(3, int(1.5 / sx)), 1, sx, sy, offset_x, offset_y, diagram_strokes_mm)
+        cls._add_hatch_band(gray, 35, 110, max(2, int(1.1 / sx)), 1, sx, sy, offset_x, offset_y, diagram_strokes_mm)
+        cls._add_hatch_band(gray, 35, 110, max(2, int(1.3 / sx)), -1, sx, sy, offset_x, offset_y, diagram_strokes_mm)
 
-                # Clip safely inside image bounds
-                x0 = max(0.0, min(w - 1.0, float(x0)))
-                y0 = max(0.0, min(h - 1.0, float(y0)))
-                x1 = max(0.0, min(w - 1.0, float(x1)))
-                y1 = max(0.0, min(h - 1.0, float(y1)))
+        return table_lines_mm, diagram_strokes_mm
 
-                hatch_strokes.append([
-                    (ox + x0 * sx, oy + y0 * sy),
-                    (ox + x1 * sx, oy + y1 * sy)
-                ])
+    @staticmethod
+    def _add_hatch_band(gray, min_g, max_g, step_px, dir_sign, sx, sy, ox, oy, out_strokes):
+        h, w = gray.shape
+        c_start = -h if dir_sign == 1 else 0
+        c_end = w if dir_sign == 1 else w + h
 
-        return hatch_strokes
+        for c in range(c_start, c_end + 1, step_px):
+            p0 = None
+            p1 = None
+            for y in range(h):
+                x = c + dir_sign * y
+                if 0 <= x < w and min_g <= gray[y, x] < max_g:
+                    pt = (ox + x * sx, oy + y * sy)
+                    if p0 is None:
+                        p0 = pt
+                    p1 = pt
+                else:
+                    if p0 is not None and p1 is not None and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > 0.6:
+                        out_strokes.append([p0, p1])
+                    p0 = None
+            if p0 is not None and p1 is not None and math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > 0.6:
+                out_strokes.append([p0, p1])
 
     @staticmethod
     def _trace_momentum_skeleton(skel):
         h, w = skel.shape
         visited = np.zeros_like(skel, dtype=bool)
         strokes = []
+        neighbors = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
 
         ys, xs = np.where(skel > 0)
-        if len(xs) == 0:
-            return []
-
-        def get_unvisited_neighbors(cx, cy):
-            nbs = []
-            for dy in (-1, 0, 1):
-                for dx in (-1, 0, 1):
-                    if dx == 0 and dy == 0:
-                        continue
-                    nx, ny = cx + dx, cy + dy
-                    if 0 <= nx < w and 0 <= ny < h and skel[ny, nx] > 0 and not visited[ny, nx]:
-                        nbs.append((nx, ny))
-            return nbs
-
-        endpoints = []
-        for x, y in zip(xs, ys):
-            cnt = sum(
-                1 for dy in (-1, 0, 1) for dx in (-1, 0, 1)
-                if (dx != 0 or dy != 0) and 0 <= x + dx < w and 0 <= y + dy < h and skel[y + dy, x + dx] > 0
-            )
-            if cnt == 1:
-                endpoints.append((x, y))
-
-        for sx, sy in endpoints + list(zip(xs, ys)):
-            if visited[sy, sx]:
+        for start_y, start_x in zip(ys, xs):
+            if visited[start_y, start_x]:
                 continue
-
-            stroke = [(float(sx), float(sy))]
-            visited[sy, sx] = True
-            cx, cy = sx, sy
-            dir_x, dir_y = 0.0, 0.0
+            pts = [(int(start_x), int(start_y))]
+            visited[start_y, start_x] = True
+            cx, cy = int(start_x), int(start_y)
+            prev_dx, prev_dy = 0, 0
 
             while True:
-                nbs = get_unvisited_neighbors(cx, cy)
-                if not nbs:
-                    break
-
-                if len(nbs) == 1 or (dir_x == 0.0 and dir_y == 0.0):
-                    nx, ny = nbs[0]
-                else:
-                    best_nb = nbs[0]
-                    best_score = -999.0
-                    for cand_x, cand_y in nbs:
-                        vx = float(cand_x - cx)
-                        vy = float(cand_y - cy)
-                        norm = math.hypot(vx, vy) or 1.0
-                        score = (vx / norm) * dir_x + (vy / norm) * dir_y
+                best_next = None
+                best_score = -999
+                for dx, dy in neighbors:
+                    nx, ny = cx + dx, cy + dy
+                    if 0 <= nx < w and 0 <= ny < h and skel[ny, nx] > 0 and not visited[ny, nx]:
+                        score = (dx * prev_dx + dy * prev_dy) if (prev_dx or prev_dy) else 0
                         if score > best_score:
                             best_score = score
-                            best_nb = (cand_x, cand_y)
-                    nx, ny = best_nb
-
-                step_x = float(nx - cx)
-                step_y = float(ny - cy)
-                step_len = math.hypot(step_x, step_y) or 1.0
-                dir_x = 0.7 * dir_x + 0.3 * (step_x / step_len)
-                dir_y = 0.7 * dir_y + 0.3 * (step_y / step_len)
-
+                            best_next = (nx, ny, dx, dy)
+                if best_next is None:
+                    break
+                nx, ny, prev_dx, prev_dy = best_next
                 visited[ny, nx] = True
-                stroke.append((float(nx), float(ny)))
+                pts.append((nx, ny))
                 cx, cy = nx, ny
 
-            if len(stroke) < 2:
-                continue
-
-            if len(stroke) >= 4:
-                smoothed = [stroke[0]]
-                for i in range(1, len(stroke) - 1):
-                    mx = 0.25 * stroke[i - 1][0] + 0.5 * stroke[i][0] + 0.25 * stroke[i + 1][0]
-                    my = 0.25 * stroke[i - 1][1] + 0.5 * stroke[i][1] + 0.25 * stroke[i + 1][1]
-                    smoothed.append((mx, my))
-                smoothed.append(stroke[-1])
-            else:
-                smoothed = stroke
-
-            pts_arr = np.array(smoothed, dtype=np.float32).reshape(-1, 1, 2)
-            approx = cv2.approxPolyDP(pts_arr, epsilon=0.65, closed=False)
-            clean_pts = [(float(p[0][0]), float(p[0][1])) for p in approx]
-            if len(clean_pts) >= 2:
-                strokes.append(clean_pts)
+            if len(pts) >= 2:
+                simplified = [pts[0]]
+                last = pts[0]
+                for pt in pts[1:-1]:
+                    if math.hypot(pt[0] - last[0], pt[1] - last[1]) >= 1.5:
+                        simplified.append(pt)
+                        last = pt
+                simplified.append(pts[-1])
+                strokes.append(simplified)
 
         return strokes

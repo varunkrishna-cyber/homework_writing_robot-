@@ -10,17 +10,121 @@ import webbrowser
 
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, render_template_string, request
-from HersheyFonts import HersheyFonts
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 import serial
 import serial.tools.list_ports
 
-from universal_doc_extractor import UniversalDocumentExtractor
+from handwriting_font_builder import HandwritingFontBuilder
+from universal_doc_extractor import UniversalDocumentExtractor, _fast_skeletonize
+
+try:
+    from HersheyFonts import HersheyFonts
+    HAS_HERSHEY = True
+except ImportError:
+    HAS_HERSHEY = False
 
 app = Flask(__name__)
 FONTS_DIR = "fonts"
 os.makedirs(FONTS_DIR, exist_ok=True)
 
-# Shared Plotter & Extracted Document State
+SYSTEM_FONT_CACHE = {}
+
+WORD_SYSTEM_FONTS = {
+    "Segoe Print (Handwriting)": ["segoepr.ttf", "segoeprb.ttf"],
+    "Segoe Script (Cursive)": ["segoesc.ttf", "segoescb.ttf"],
+    "Comic Sans MS": ["comic.ttf", "comicbd.ttf"],
+    "Lucida Handwriting": ["lhandw.ttf"],
+    "Bradley Hand ITC": ["bradhitc.ttf"],
+    "Ink Free": ["inkfree.ttf"],
+    "Gabriola": ["gabriola.ttf"],
+    "Times New Roman": ["times.ttf"],
+    "Calibri": ["calibri.ttf"],
+    "Arial": ["arial.ttf"],
+    "Georgia": ["georgia.ttf"],
+    "Consolas": ["consola.ttf"],
+}
+
+BUILTIN_GLYPHS = {
+    'A': [[[0,0],[0.3,1],[0.6,0]], [[0.1,0.35],[0.5,0.35]]],
+    'B': [[[0,0],[0,1],[0.4,1],[0.52,0.88],[0.52,0.62],[0.4,0.5],[0,0.5]], [[0.4,0.5],[0.55,0.38],[0.55,0.12],[0.4,0],[0,0]]],
+    'C': [[[0.55,0.85],[0.4,1],[0.15,1],[0,0.8],[0,0.2],[0.15,0],[0.4,0],[0.55,0.15]]],
+    'D': [[[0,0],[0,1],[0.35,1],[0.55,0.8],[0.55,0.2],[0.35,0],[0,0]]],
+    'E': [[[0.5,1],[0,1],[0,0],[0.5,0]], [[0,0.5],[0.4,0.5]]],
+    'F': [[[0.5,1],[0,1],[0,0]], [[0,0.5],[0.4,0.5]]],
+    'G': [[[0.55,0.85],[0.4,1],[0.15,1],[0,0.8],[0,0.2],[0.15,0],[0.45,0],[0.55,0.2],[0.55,0.45],[0.32,0.45]]],
+    'H': [[[0,1],[0,0]], [[0.55,1],[0.55,0]], [[0,0.5],[0.55,0.5]]],
+    'I': [[[0.15,1],[0.45,1]], [[0.3,1],[0.3,0]], [[0.15,0],[0.45,0]]],
+    'J': [[[0.45,1],[0.45,0.2],[0.32,0],[0.12,0],[0,0.18]]],
+    'K': [[[0,1],[0,0]], [[0.55,1],[0.05,0.45],[0.55,0]]],
+    'L': [[[0,1],[0,0],[0.5,0]]],
+    'M': [[[0,0],[0,1],[0.32,0.35],[0.64,1],[0.64,0]]],
+    'N': [[[0,0],[0,1],[0.55,0],[0.55,1]]],
+    'O': [[[0.2,1],[0.4,1],[0.58,0.8],[0.58,0.2],[0.4,0],[0.2,0],[0,0.2],[0,0.8],[0.2,1]]],
+    'P': [[[0,0],[0,1],[0.42,1],[0.55,0.85],[0.55,0.62],[0.42,0.5],[0,0.5]]],
+    'Q': [[[0.2,1],[0.4,1],[0.58,0.8],[0.58,0.2],[0.4,0],[0.2,0],[0,0.2],[0,0.8],[0.2,1]], [[0.38,0.22],[0.62,-0.05]]],
+    'R': [[[0,0],[0,1],[0.42,1],[0.55,0.85],[0.55,0.62],[0.42,0.5],[0,0.5]], [[0.32,0.5],[0.55,0]]],
+    'S': [[[0.52,0.88],[0.38,1],[0.15,1],[0.02,0.85],[0.02,0.65],[0.52,0.38],[0.52,0.15],[0.38,0],[0.12,0],[0,0.14]]],
+    'T': [[[0,1],[0.6,1]], [[0.3,1],[0.3,0]]],
+    'U': [[[0,1],[0,0.2],[0.15,0],[0.4,0],[0.55,0.2],[0.55,1]]],
+    'V': [[[0,1],[0.28,0],[0.56,1]]],
+    'W': [[[0,1],[0.18,0],[0.35,0.6],[0.52,0],[0.7,1]]],
+    'X': [[[0,1],[0.55,0]], [[0.55,1],[0,0]]],
+    'Y': [[[0,1],[0.28,0.48],[0.56,1]], [[0.28,0.48],[0.28,0]]],
+    'Z': [[[0,1],[0.55,1],[0,0],[0.55,0]]],
+    'a': [[[0.42,0.55],[0.15,0.55],[0,0.4],[0,0.15],[0.15,0],[0.42,0]], [[0.42,0.55],[0.42,0]]],
+    'b': [[[0,1],[0,0],[0.32,0],[0.45,0.15],[0.45,0.42],[0.32,0.55],[0,0.55]]],
+    'c': [[[0.42,0.45],[0.3,0.55],[0.12,0.55],[0,0.4],[0,0.15],[0.12,0],[0.3,0],[0.42,0.1]]],
+    'd': [[[0.45,1],[0.45,0],[0.15,0],[0,0.15],[0,0.42],[0.15,0.55],[0.45,0.55]]],
+    'e': [[[0,0.28],[0.44,0.28],[0.44,0.44],[0.3,0.55],[0.12,0.55],[0,0.4],[0,0.14],[0.14,0],[0.38,0]]],
+    'f': [[[0.38,0.92],[0.26,1],[0.15,0.9],[0.15,0]], [[0.02,0.55],[0.34,0.55]]],
+    'g': [[[0.44,0.55],[0.15,0.55],[0,0.42],[0,0.15],[0.15,0],[0.44,0]], [[0.44,0.55],[0.44,-0.22],[0.3,-0.34],[0.1,-0.34]]],
+    'h': [[[0,1],[0,0]], [[0,0.42],[0.16,0.55],[0.34,0.55],[0.44,0.42],[0.44,0]]],
+    'i': [[[0.15,0.55],[0.15,0]], [[0.15,0.78],[0.15,0.82]]],
+    'j': [[[0.22,0.55],[0.22,-0.22],[0.1,-0.34],[0,-0.3]], [[0.22,0.78],[0.22,0.82]]],
+    'k': [[[0,1],[0,0]], [[0.42,0.55],[0.04,0.25],[0.42,0]]],
+    'l': [[[0.15,1],[0.15,0.08],[0.25,0]]],
+    'm': [[[0,0.55],[0,0]], [[0,0.44],[0.12,0.55],[0.24,0.55],[0.32,0.44],[0.32,0]], [[0.32,0.44],[0.44,0.55],[0.56,0.55],[0.64,0.44],[0.64,0]]],
+    'n': [[[0,0.55],[0,0]], [[0,0.42],[0.16,0.55],[0.34,0.55],[0.44,0.42],[0.44,0]]],
+    'o': [[[0.15,0.55],[0.32,0.55],[0.45,0.4],[0.45,0.15],[0.32,0],[0.15,0],[0,0.15],[0,0.4],[0.15,0.55]]],
+    'p': [[[0,-0.34],[0,0.55],[0.32,0.55],[0.45,0.42],[0.45,0.15],[0.32,0],[0,0]]],
+    'q': [[[0.44,-0.34],[0.44,0.55],[0.14,0.55],[0,0.42],[0,0.15],[0.14,0],[0.44,0]]],
+    'r': [[[0,0.55],[0,0]], [[0,0.38],[0.14,0.55],[0.32,0.55]]],
+    's': [[[0.4,0.46],[0.28,0.55],[0.12,0.55],[0.02,0.44],[0.4,0.16],[0.28,0],[0.1,0],[0,0.1]]],
+    't': [[[0.18,0.88],[0.18,0.1],[0.28,0],[0.38,0]], [[0.04,0.55],[0.34,0.55]]],
+    'u': [[[0,0.55],[0,0.14],[0.14,0],[0.32,0],[0.44,0.14],[0.44,0.55]]],
+    'v': [[[0,0.55],[0.22,0],[0.44,0.55]]],
+    'w': [[[0,0.55],[0.14,0],[0.28,0.38],[0.42,0],[0.56,0.55]]],
+    'x': [[[0,0.55],[0.44,0]], [[0.44,0.55],[0,0]]],
+    'y': [[[0,0.55],[0.22,0]], [[0.44,0.55],[0.12,-0.34],[0,-0.34]]],
+    'z': [[[0,0.55],[0.42,0.55],[0,0],[0.42,0]]],
+    '0': [[[0.18,1],[0.38,1],[0.52,0.8],[0.52,0.2],[0.38,0],[0.18,0],[0,0.2],[0,0.8],[0.18,1]]],
+    '1': [[[0.12,0.82],[0.28,1],[0.28,0]], [[0.12,0],[0.44,0]]],
+    '2': [[[0.04,0.82],[0.2,1],[0.4,1],[0.52,0.84],[0.52,0.65],[0.02,0],[0.54,0]]],
+    '3': [[[0.04,0.86],[0.2,1],[0.4,1],[0.52,0.84],[0.52,0.64],[0.34,0.52],[0.22,0.52]], [[0.34,0.52],[0.54,0.38],[0.54,0.16],[0.38,0],[0.16,0],[0.02,0.14]]],
+    '4': [[[0.42,0],[0.42,1],[0,0.32],[0.56,0.32]]],
+    '5': [[[0.5,1],[0.06,1],[0.04,0.56],[0.38,0.56],[0.52,0.4],[0.52,0.16],[0.36,0],[0.14,0],[0.02,0.14]]],
+    '6': [[[0.46,0.88],[0.32,1],[0.16,1],[0.02,0.8],[0.02,0.18],[0.16,0],[0.38,0],[0.52,0.18],[0.52,0.38],[0.38,0.52],[0.02,0.52]]],
+    '7': [[[0,1],[0.54,1],[0.18,0]]],
+    '8': [[[0.18,0.52],[0.04,0.66],[0.04,0.86],[0.18,1],[0.38,1],[0.52,0.86],[0.52,0.66],[0.38,0.52],[0.18,0.52],[0.02,0.36],[0.02,0.16],[0.18,0],[0.38,0],[0.54,0.16],[0.54,0.36],[0.38,0.52]]],
+    '9': [[[0.52,0.48],[0.16,0.48],[0.02,0.62],[0.02,0.84],[0.16,1],[0.38,1],[0.52,0.84],[0.52,0.18],[0.36,0],[0.14,0]]],
+    '.': [[[0.12,0.06],[0.18,0.06],[0.18,0],[0.12,0],[0.12,0.06]]],
+    ',': [[[0.16,0.08],[0.16,-0.12],[0.08,-0.2]]],
+    ':': [[[0.14,0.52],[0.14,0.46]], [[0.14,0.08],[0.14,0.02]]],
+    ';': [[[0.14,0.52],[0.14,0.46]], [[0.14,0.08],[0.14,-0.12],[0.06,-0.2]]],
+    '-': [[[0.06,0.42],[0.42,0.42]]],
+    '=': [[[0.06,0.54],[0.46,0.54]], [[0.06,0.32],[0.46,0.32]]],
+    '+': [[[0.26,0.68],[0.26,0.18]], [[0.04,0.43],[0.48,0.43]]],
+    '*': [[[0.26,0.68],[0.26,0.22]], [[0.06,0.56],[0.46,0.34]], [[0.46,0.56],[0.06,0.34]]],
+    '/': [[[0.04,0],[0.46,1]]],
+    '(': [[[0.34,1],[0.14,0.75],[0.14,0.25],[0.34,0]]],
+    ')': [[[0.12,1],[0.32,0.75],[0.32,0.25],[0.12,0]]],
+    '!': [[[0.16,1],[0.16,0.25]], [[0.16,0.06],[0.16,0]]],
+    '?': [[[0.04,0.82],[0.18,1],[0.38,1],[0.5,0.84],[0.5,0.65],[0.26,0.45],[0.26,0.26]], [[0.26,0.06],[0.26,0]]],
+    "'": [[[0.14,1],[0.14,0.76]]],
+    '"': [[[0.1,1],[0.1,0.76]], [[0.26,1],[0.26,0.76]]],
+}
+
 state = {
     "serial_conn": None,
     "is_plotting": False,
@@ -36,10 +140,93 @@ state = {
     "temp_file_path": None,
 }
 
-# ==========================================================
-# DRAFTMATE ARCHITECTURAL WEB UI (INTEGRATED EDITION)
-# ==========================================================
-DRAFTMATE_HTML = """
+
+def _find_windows_font_path(label):
+    candidates = WORD_SYSTEM_FONTS.get(label, [])
+    win_fonts_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+    for fname in candidates:
+        full = os.path.join(win_fonts_dir, fname)
+        if os.path.exists(full):
+            return full
+    return None
+
+
+def _get_word_font_glyph(font_label, ch):
+    cache_key = (font_label, ch)
+    if cache_key in SYSTEM_FONT_CACHE:
+        return SYSTEM_FONT_CACHE[cache_key]
+
+    ttf_path = _find_windows_font_path(font_label)
+    if not ttf_path:
+        return BUILTIN_GLYPHS.get(ch) or BUILTIN_GLYPHS.get(ch.upper(), [])
+
+    try:
+        pil_font = ImageFont.truetype(ttf_path, 72)
+        canvas_size = 140
+        baseline_px = 100
+        cap_h_px = 52.0
+
+        img = Image.new("L", (canvas_size, canvas_size), 0)
+        draw = ImageDraw.Draw(img)
+        draw.text((20, baseline_px - 68), ch, fill=255, font=pil_font)
+
+        arr = np.array(img)
+        if not np.any(arr):
+            SYSTEM_FONT_CACHE[cache_key] = []
+            return []
+
+        ys, xs = np.where(arr > 128)
+        x_min = int(xs.min())
+
+        skel = _fast_skeletonize(arr > 128)
+        h, w = skel.shape
+        visited = np.zeros_like(skel, dtype=bool)
+        neighbors = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+        norm_strokes = []
+
+        sys_pts, sxs_pts = np.where(skel > 0)
+        for sy, sx in zip(sys_pts, sxs_pts):
+            if visited[sy, sx]:
+                continue
+            pts = [(int(sx), int(sy))]
+            visited[sy, sx] = True
+            cx, cy = int(sx), int(sy)
+            pdx, pdy = 0, 0
+
+            while True:
+                best_next = None
+                best_score = -999
+                for dx, dy in neighbors:
+                    nx, ny = cx + dx, cy + dy
+                    if 0 <= nx < w and 0 <= ny < h and skel[ny, nx] > 0 and not visited[ny, nx]:
+                        score = (dx * pdx + dy * pdy) if (pdx or pdy) else 0
+                        if score > best_score:
+                            best_score = score
+                            best_next = (nx, ny, dx, dy)
+                if best_next is None:
+                    break
+                nx, ny, pdx, pdy = best_next
+                visited[ny, nx] = True
+                pts.append((nx, ny))
+                cx, cy = nx, ny
+
+            if len(pts) >= 2:
+                scaled = []
+                for px, py in pts:
+                    nx = round((px - x_min) / cap_h_px, 4)
+                    ny = round((baseline_px - py) / cap_h_px, 4)
+                    if not scaled or math.hypot(nx - scaled[-1][0], ny - scaled[-1][1]) >= 0.03:
+                        scaled.append([nx, ny])
+                if len(scaled) >= 2:
+                    norm_strokes.append(scaled)
+
+        SYSTEM_FONT_CACHE[cache_key] = norm_strokes
+        return norm_strokes
+    except Exception:
+        return BUILTIN_GLYPHS.get(ch) or BUILTIN_GLYPHS.get(ch.upper(), [])
+
+
+DRAFTMATE_HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -141,7 +328,7 @@ DRAFTMATE_HTML = """
   .main-stage {
     flex: 1;
     display: grid;
-    grid-template-columns: 345px 1fr 295px;
+    grid-template-columns: 350px 1fr 315px;
     gap: 14px;
     padding: 14px;
     min-height: 0;
@@ -169,6 +356,21 @@ DRAFTMATE_HTML = """
     display: flex;
     justify-content: space-between;
     align-items: center;
+  }
+
+  .hw-banner {
+    margin: 10px 12px 0 12px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #f0fdfa;
+    border: 1px solid #99f6e4;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #0f766e;
+    cursor: pointer;
   }
 
   .drop-box {
@@ -265,10 +467,10 @@ DRAFTMATE_HTML = """
   }
 
   .inspector-body {
-    padding: 14px;
+    padding: 12px 14px;
     display: flex;
     flex-direction: column;
-    gap: 13px;
+    gap: 11px;
     overflow-y: auto;
     flex: 1;
   }
@@ -284,9 +486,33 @@ DRAFTMATE_HTML = """
     border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; font-weight: 600;
   }
 
+  .hw-clone-box {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 10px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .hw-clone-title {
+    font-size: 11.5px; font-weight: 800; color: #92400e;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .hw-guide {
+    font-family: 'Consolas', monospace;
+    font-size: 10.5px;
+    background: #ffffff;
+    border: 1px solid #fcd34d;
+    border-radius: 6px;
+    padding: 6px;
+    color: #451a03;
+    line-height: 1.45;
+  }
+
   .telemetry-grid {
     display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
-    margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border);
+    margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border);
   }
   .stat-tile {
     background: var(--surface-alt); border: 1px solid var(--border);
@@ -301,7 +527,6 @@ DRAFTMATE_HTML = """
 </head>
 <body>
 
-  <!-- TOP ARCHITECTURAL RIBBON -->
   <header class="top-ribbon">
     <div class="brand-group">
       <div class="logo-badge">✒</div>
@@ -324,10 +549,8 @@ DRAFTMATE_HTML = """
     </div>
   </header>
 
-  <!-- 3-ZONE WORKSPACE -->
   <div class="main-stage">
 
-    <!-- LEFT PANEL: FILE UPLOAD, CLIPBOARD PASTE, URL & TEXT EDITOR -->
     <section class="card">
       <div class="card-title">
         <span>1. Source Input</span>
@@ -335,6 +558,11 @@ DRAFTMATE_HTML = """
       </div>
 
       <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.docx,.txt" style="display:none" onchange="uploadFile(this.files[0])" />
+
+      <label class="hw-banner" title="Extracts human-written text and circuit diagrams from scanned notebook pages">
+        <input type="checkbox" id="chkHandwrittenMode" onchange="reextractCurrentFile()" />
+        <span>✍ Handwritten Notes + Circuit Diagrams Mode</span>
+      </label>
 
       <div id="dropZone" class="drop-box" onclick="document.getElementById('fileInput').click()">
         <b>Drop PDF, Sketch, Word (.docx), or TXT</b><br/>
@@ -353,7 +581,7 @@ DRAFTMATE_HTML = """
       </div>
 
       <div class="card-title" style="border-top:1px solid var(--border);">
-        <span>Document Text</span>
+        <span>Document Text (Editable)</span>
         <button style="padding:2px 8px; font-size:11px;" onclick="compilePaths()">Sync</button>
       </div>
 
@@ -364,7 +592,6 @@ Aim: To verify the relationship between voltage and current.
 Formula: V = I * R</textarea>
     </section>
 
-    <!-- CENTER STAGE: INTERACTIVE A4 SHEET -->
     <section class="viewport-container">
       <div id="coordHud" class="coord-chip">X: 0.0 mm  Y: 0.0 mm  |  100%</div>
       <canvas id="sheetCanvas"></canvas>
@@ -374,7 +601,7 @@ Formula: V = I * R</textarea>
           <input type="checkbox" id="chkShowTables" checked onchange="drawSheet()" /> Tables
         </label>
         <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-weight:600;">
-          <input type="checkbox" id="chkShowDraw" checked onchange="drawSheet()" /> Drawings & Shading
+          <input type="checkbox" id="chkShowDraw" checked onchange="drawSheet()" /> Diagrams & Circuits
         </label>
         <label style="display:flex; align-items:center; gap:4px; cursor:pointer; font-weight:600;">
           <input type="checkbox" id="chkShowText" checked onchange="drawSheet()" /> Text
@@ -388,10 +615,9 @@ Formula: V = I * R</textarea>
       </div>
     </section>
 
-    <!-- RIGHT PANEL: CALIBRATION & HANDWRITING INSPECTOR -->
     <section class="card">
       <div class="card-title">
-        <span>2. Pen & Calibration</span>
+        <span>2. Fonts, Handwriting & Pen</span>
       </div>
 
       <div class="inspector-body">
@@ -402,9 +628,28 @@ Formula: V = I * R</textarea>
 
         <div class="param-block">
           <div class="param-hdr">
-            <span>Handwriting Style (Custom + Hershey)</span>
+            <span>Font / Handwriting Style</span>
           </div>
           <select id="selFont" onchange="compilePaths()"></select>
+        </div>
+
+        <div class="hw-clone-box">
+          <div class="hw-clone-title">
+            <span>📸 Add My Handwriting (Photo)</span>
+            <button style="padding:2px 7px; font-size:10.5px;" onclick="downloadSampleSheet()">⬇ Guide</button>
+          </div>
+          <div class="hw-guide">
+            Write these 4 rows on white paper &amp; upload pic:<br/>
+            <b>Row 1:</b> A B C D E F G H I J K L M N O P Q R S T U V W X Y Z<br/>
+            <b>Row 2:</b> a b c d e f g h i j k l m n o p q r s t u v w x y z<br/>
+            <b>Row 3:</b> 0 1 2 3 4 5 6 7 8 9<br/>
+            <b>Row 4:</b> . , : ; - = + * / ( ) ! ? ' "
+          </div>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="txtFontName" value="My_Handwriting" placeholder="Style name..." style="flex:1; font-size:11.5px; padding:5px 8px;" />
+            <input type="file" id="hwSampleInput" accept="image/*" style="display:none" onchange="uploadHandwritingSample(this.files[0])" />
+            <button class="btn-accent" style="padding:5px 9px; font-size:11.5px;" onclick="document.getElementById('hwSampleInput').click()">Upload Pic</button>
+          </div>
         </div>
 
         <div class="param-block">
@@ -475,9 +720,48 @@ function fitCanvasResolution() {
   drawSheet();
 }
 
-// ==========================================================
-// DRAG-DROP & CTRL+V IMAGE PASTE -> PYTHON EXTRACTOR
-// ==========================================================
+async function uploadHandwritingSample(file) {
+  if (!file) return;
+  const styleName = document.getElementById('txtFontName').value.trim() || 'My_Handwriting';
+  setStatus(`Learning your handwriting from ${file.name}...`, 'busy');
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('style_name', styleName);
+
+  const res = await fetch('/api/train_handwriting', { method: 'POST', body: formData });
+  const data = await res.json();
+  if (data.error) {
+    alert(data.error);
+    setStatus('Handwriting scan failed', 'idle');
+    return;
+  }
+
+  await loadFontStyles(data.style_label);
+  await compilePaths();
+  alert(`Learned ${data.matched_count} characters from your handwriting! Selected "${data.style_label}".`);
+}
+
+function downloadSampleSheet() {
+  const txt = [
+    "DRAFTMATE HANDWRITING CALIBRATION SHEET",
+    "Write each row clearly on plain white paper using a dark pen, leave small gaps between letters, then take a photo and click 'Upload Pic':",
+    "",
+    "Row 1:  A  B  C  D  E  F  G  H  I  J  K  L  M  N  O  P  Q  R  S  T  U  V  W  X  Y  Z",
+    "",
+    "Row 2:  a  b  c  d  e  f  g  h  i  j  k  l  m  n  o  p  q  r  s  t  u  v  w  x  y  z",
+    "",
+    "Row 3:  0  1  2  3  4  5  6  7  8  9",
+    "",
+    "Row 4:  .  ,  :  ;  -  =  +  *  /  (  )  !  ?  '  \""
+  ].join("\n");
+  const blob = new Blob([txt], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'handwriting_calibration_guide.txt';
+  a.click();
+}
+
 window.addEventListener('paste', async (e) => {
   const items = (e.clipboardData || e.originalEvent.clipboardData).items;
   for (const item of items) {
@@ -505,6 +789,7 @@ async function uploadFile(file) {
 
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('handwritten_mode', document.getElementById('chkHandwrittenMode').checked ? '1' : '0');
 
   const res = await fetch('/api/upload', { method: 'POST', body: formData });
   const data = await res.json();
@@ -516,11 +801,24 @@ async function uploadFile(file) {
   applyExtractedDocument(data);
 }
 
+async function reextractCurrentFile() {
+  const hw = document.getElementById('chkHandwrittenMode').checked ? '1' : '0';
+  setStatus('Switching extraction mode...', 'busy');
+  const res = await fetch(`/api/page/${currentPage}?hw=${hw}`);
+  const data = await res.json();
+  if (!data.error) {
+    applyExtractedDocument(data);
+  } else {
+    setStatus('Ready • Upload a file to extract', 'idle');
+  }
+}
+
 async function changePage(delta) {
   const target = currentPage + delta;
   if (target < 0 || target >= totalPages) return;
+  const hw = document.getElementById('chkHandwrittenMode').checked ? '1' : '0';
   setStatus(`Loading page ${target + 1}...`, 'busy');
-  const res = await fetch(`/api/page/${target}`);
+  const res = await fetch(`/api/page/${target}?hw=${hw}`);
   const data = await res.json();
   if (!data.error) applyExtractedDocument(data);
 }
@@ -556,9 +854,6 @@ function applyExtractedDocument(data) {
   compilePaths();
 }
 
-// ==========================================================
-// COMPILE STROKES VIA PYTHON BACKEND (HERSHEY + CUSTOM FONTS)
-// ==========================================================
 function updateParamLabels() {
   document.getElementById('valHeight').innerText = `${parseFloat(document.getElementById('sldHeight').value).toFixed(1)} mm`;
   document.getElementById('valSlant').innerText = `${document.getElementById('sldSlant').value}%`;
@@ -599,9 +894,6 @@ async function compilePaths() {
   drawSheet();
 }
 
-// ==========================================================
-// A4 SHEET RENDERER & PEN SIMULATION
-// ==========================================================
 function drawSheet() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const wPx = 210 * viewZoom, hPx = 297 * viewZoom;
@@ -717,9 +1009,6 @@ canvas.addEventListener('mousemove', (e) => {
   document.getElementById('coordHud').innerText = `X: ${mx} mm  Y: ${my} mm  |  ${Math.round((viewZoom / 1.9) * 100)}%`;
 });
 
-// ==========================================================
-// PYTHON BACKEND HARDWARE & FONT API CALLS
-// ==========================================================
 async function refreshPorts() {
   const res = await fetch('/api/ports');
   const data = await res.json();
@@ -727,11 +1016,14 @@ async function refreshPorts() {
   sel.innerHTML = data.ports.map(p => `<option value="${p}">${p}</option>`).join('');
 }
 
-async function loadFontStyles() {
+async function loadFontStyles(selectStyle = null) {
   const res = await fetch('/api/styles');
   const data = await res.json();
   const sel = document.getElementById('selFont');
   sel.innerHTML = data.styles.map(s => `<option value="${s}">${s}</option>`).join('');
+  if (selectStyle && data.styles.includes(selectStyle)) {
+    sel.value = selectStyle;
+  }
 }
 
 async function toggleBackendUsb() {
@@ -788,9 +1080,6 @@ function setStatus(text, mode) {
 """
 
 
-# ==========================================================
-# FLASK ROUTES INTEGRATING ALL PYTHON MODULES
-# ==========================================================
 @app.route("/")
 def index():
     return render_template_string(DRAFTMATE_HTML)
@@ -805,10 +1094,51 @@ def api_ports():
 @app.route("/api/styles")
 def api_styles():
     custom_files = sorted(glob.glob(os.path.join(FONTS_DIR, "*.json")))
-    custom_labels = [f"[Custom] {os.path.splitext(os.path.basename(f))[0]}" for f in custom_files]
-    hf = HersheyFonts()
-    builtin_labels = [f"[Built-in] {name}" for name in sorted(hf.default_font_names)]
-    return jsonify({"styles": custom_labels + builtin_labels})
+    custom_labels = [f"[My Handwriting] {os.path.splitext(os.path.basename(f))[0]}" for f in custom_files]
+
+    word_labels = [
+        f"[Word / System] {label}"
+        for label in WORD_SYSTEM_FONTS
+        if _find_windows_font_path(label) is not None
+    ]
+
+    vector_labels = ["[Vector] Built-in Neat Script"]
+    if HAS_HERSHEY:
+        vector_labels.extend([
+            "[Hershey] Cursive Script (scriptc)",
+            "[Hershey] Flowing Script (scripts)",
+            "[Hershey] Clean Sans (futural)",
+            "[Hershey] Classic Serif (timesr)",
+        ])
+
+    return jsonify({"styles": custom_labels + word_labels + vector_labels})
+
+
+@app.route("/api/train_handwriting", methods=["POST"])
+def api_train_handwriting():
+    if "file" not in request.files:
+        return jsonify({"error": "No image received"})
+    f = request.files["file"]
+    style_name = request.form.get("style_name", "My_Handwriting").strip() or "My_Handwriting"
+    ext = os.path.splitext(f.filename or "sample.png")[1].lower() or ".png"
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+    f.save(tmp.name)
+    tmp.close()
+
+    try:
+        saved_name, matched_count = HandwritingFontBuilder.build_font_from_image(
+            tmp.name, style_name, fonts_dir=FONTS_DIR
+        )
+        return jsonify({
+            "style_label": f"[My Handwriting] {saved_name}",
+            "matched_count": matched_count
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+    finally:
+        if os.path.exists(tmp.name):
+            os.remove(tmp.name)
 
 
 @app.route("/api/connect", methods=["POST"])
@@ -837,6 +1167,7 @@ def api_upload():
     if "file" not in request.files:
         return jsonify({"error": "No file received"})
     f = request.files["file"]
+    hw_mode = request.form.get("handwritten_mode", "0") == "1"
     ext = os.path.splitext(f.filename or "clipboard.png")[1].lower() or ".png"
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
@@ -844,20 +1175,25 @@ def api_upload():
     tmp.close()
 
     state["temp_file_path"] = tmp.name
-    return _load_page(0)
+    return _load_page(0, hw_mode=hw_mode)
 
 
 @app.route("/api/page/<int:page_num>")
 def api_page(page_num):
-    return _load_page(page_num)
+    hw_mode = request.args.get("hw", "0") == "1"
+    return _load_page(page_num, hw_mode=hw_mode)
 
 
-def _load_page(page_num):
+def _load_page(page_num, hw_mode=False):
     path = state.get("temp_file_path")
     if not path or not os.path.exists(path):
         return jsonify({"error": "No document loaded"})
     try:
-        data = UniversalDocumentExtractor.extract_file(path, page_num)
+        if hw_mode:
+            data = UniversalDocumentExtractor.extract_handwritten_notes(path, page_num)
+        else:
+            data = UniversalDocumentExtractor.extract_file(path, page_num)
+
         state["total_pages"] = data["total_pages"]
         state["current_page"] = page_num
         state["doc_text_items"] = data["text_items"]
@@ -900,24 +1236,43 @@ def api_generate():
     letter_h = float(cfg.get("letter_h", 6.0))
     slant_amt = float(cfg.get("slant", 15.0)) / 100.0
     pen_down_angle = int(cfg.get("servo", 45))
-    selected = cfg.get("style", "[Built-in] scripts")
+    selected = cfg.get("style", "[Vector] Built-in Neat Script")
 
     custom_glyphs = {}
-    is_custom = selected.startswith("[Custom] ")
-    fallback_font_name = "scripts"
+    is_custom = selected.startswith("[My Handwriting] ")
+    is_word_font = selected.startswith("[Word / System] ")
+    is_hershey = selected.startswith("[Hershey] ") and HAS_HERSHEY
 
+    hf = None
     if is_custom:
-        style_name = selected.replace("[Custom] ", "", 1)
+        style_name = selected.replace("[My Handwriting] ", "", 1)
         json_path = os.path.join(FONTS_DIR, f"{style_name}.json")
         if os.path.exists(json_path):
             with open(json_path, "r") as f:
                 custom_glyphs = json.load(f)
-    else:
-        fallback_font_name = selected.replace("[Built-in] ", "", 1)
+    elif is_hershey:
+        hf = HersheyFonts()
+        code = selected.split("(")[-1].rstrip(")")
+        hf.load_default_font(code)
 
-    font = HersheyFonts()
-    font.load_default_font(fallback_font_name)
-    font.normalize_rendering(letter_h)
+    def get_glyph(ch, h_mm):
+        if is_custom:
+            raw = custom_glyphs.get(ch) or BUILTIN_GLYPHS.get(ch) or BUILTIN_GLYPHS.get(ch.upper(), [])
+            return [[(x * h_mm, y * h_mm) for x, y in s] for s in raw]
+        elif is_word_font:
+            word_label = selected.replace("[Word / System] ", "", 1)
+            raw = _get_word_font_glyph(word_label, ch)
+            return [[(x * h_mm, y * h_mm) for x, y in s] for s in raw]
+        elif is_hershey and hf is not None:
+            hf.normalize_rendering(h_mm)
+            raw_strokes = list(hf.strokes_for_text(ch))
+            if not raw_strokes:
+                return []
+            min_x = min(p[0] for s in raw_strokes for p in s)
+            return [[(p[0] - min_x, -p[1]) for p in s] for s in raw_strokes]
+        else:
+            raw = BUILTIN_GLYPHS.get(ch) or BUILTIN_GLYPHS.get(ch.upper(), [])
+            return [[(x * h_mm, y * h_mm) for x, y in s] for s in raw]
 
     text_strokes = []
     table_strokes = list(state["doc_table_lines_mm"]) if cfg.get("exact_mode") else []
@@ -930,11 +1285,7 @@ def api_generate():
             if ch == " ":
                 cx += h_mm * 0.48
                 continue
-            if is_custom and ch in custom_glyphs:
-                glyph = [[(x * h_mm, y * h_mm) for x, y in s] for s in custom_glyphs[ch]]
-            else:
-                font.normalize_rendering(h_mm)
-                glyph = list(font.strokes_for_text(ch))
+            glyph = get_glyph(ch, h_mm)
             max_x = 0
             for s in glyph:
                 pts = [[cx + x + (y * slant), sy - y] for x, y in s]
@@ -957,10 +1308,7 @@ def api_generate():
             if ch == " ":
                 cx += letter_h * 0.52
                 continue
-            if is_custom and ch in custom_glyphs:
-                glyph = [[(x * letter_h, y * letter_h) for x, y in s] for s in custom_glyphs[ch]]
-            else:
-                glyph = list(font.strokes_for_text(ch))
+            glyph = get_glyph(ch, letter_h)
             max_x = 0
             for s in glyph:
                 pts = [[cx + x + (y * slant), cy - y] for x, y in s]
